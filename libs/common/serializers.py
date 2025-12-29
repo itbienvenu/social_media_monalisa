@@ -8,6 +8,7 @@ class Platform(str, Enum):
     FACEBOOK = "facebook"
     TIKTOK = "tiktok"
     LINKEDIN = "linkedin"
+    INSTAGRAM = "instagram"
 
 class PostStatus(str, Enum):
     PENDING = "pending"
@@ -36,6 +37,7 @@ class PlatformPostEvent(BaseModel):
     platform: Platform
     content: str
     media_url: Optional[str] = None
+    user_id: str
     
 class AnalyticsSnapshot(BaseModel):
     post_id: uuid.UUID

@@ -1,35 +1,67 @@
+from collections import defaultdict
+import asyncio
 import json
 import logging
-from typing import Any, Callable
+import os
+import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
 
 class MessageQueue:
-    """
-    Mock Message Queue interface.
-    In a real implementation, this would connect to RabbitMQ or Kafka.
-    """
     def __init__(self, service_name: str):
         self.service_name = service_name
-        self.listeners: list[Callable] = []
+        self.redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+        self.redis = None
+        self.pubsub = None
+        self._handlers = defaultdict(list)
 
-    async def publish(self, topic: str, message: dict[str, Any]):
-        """
-        Mock publish. Just logs the event.
-        """
-        logger.info(f"[{self.service_name}] Published to {topic}: {json.dumps(message)}")
+    async def connect(self):
+        if not self.redis:
+            self.redis = redis.from_url(self.redis_url, decode_responses=True)
+            self.pubsub = self.redis.pubsub()
+            logger.info(f"[{self.service_name}] Connected to Redis at {self.redis_url}")
 
-    async def subscribe(self, topic: str, callback: Callable):
-        """
-        Mock subscribe.
-        For now, this won't actually receive messages across processes because we are mocking.
-        In a real scenario, this would start a consumer loop.
-        """
+    async def disconnect(self):
+        if self.redis:
+            await self.redis.close()
+            logger.info(f"[{self.service_name}] Disconnected from Redis")
+
+    async def publish(self, topic: str, message: dict):
+        if not self.redis:
+            await self.connect()
+        logger.info(f"[{self.service_name}] Publishing to {topic}: {message}")
+        await self.redis.publish(topic, json.dumps(message))
+
+    async def subscribe(self, topic: str, handler):
+        if not self.redis:
+            await self.connect()
+        self._handlers[topic].append(handler)
+        await self.pubsub.subscribe(topic)
         logger.info(f"[{self.service_name}] Subscribed to {topic}")
-        self.listeners.append((topic, callback))
+        # Note: We rely on the service loop to run listen() separately
+        # Or we can spawn a task here.
+        # Spawning here is easier for usage compat.
+        if len(self._handlers) == 1: # First subscription
+             asyncio.create_task(self.start_listening())
 
-    # Helper for simulation
-    async def simulate_receive(self, topic: str, message: dict[str, Any]):
-        for t, callback in self.listeners:
-            if t == topic:
-                await callback(message)
+    async def start_listening(self):
+        if not self.pubsub:
+            await self.connect()
+        
+        try:
+            async for message in self.pubsub.listen():
+                if message['type'] == 'message':
+                    topic = message['channel']
+                    try:
+                        data = json.loads(message['data'])
+                        handlers = self._handlers.get(topic, [])
+                        for h in handlers:
+                             try:
+                                 await h(data)
+                             except Exception as e:
+                                 logger.error(f"Error handling message on {topic}: {e}")
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to decode message on {topic}")
+        except Exception as e:
+             logger.error(f"Redis listener error: {e}")
+             # Reconnect logic would go here

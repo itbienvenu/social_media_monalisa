@@ -46,8 +46,9 @@ class FacebookClient:
     async def close(self):
         await self.client.aclose()
 
-async def post_to_facebook(post_id: str, content: str):
-    client = FacebookClient(MOCK_ACCESS_TOKEN, MOCK_PAGE_ID)
+async def post_to_facebook(post_id: str, content: str, access_token: str, page_id: str):
+    # Use the passed token and page_id instead of env vars
+    client = FacebookClient(access_token, page_id)
     try:
         # Retry logic
         for attempt in range(3):

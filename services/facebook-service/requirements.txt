@@ -1,4 +1,11 @@
 asyncio
 pydantic
 httpx
+databases[postgresql]
+sqlalchemy
+fastapi
+uvicorn
+asyncpg
+psycopg2-binary
+redis
 

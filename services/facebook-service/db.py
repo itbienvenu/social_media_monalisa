@@ -3,10 +3,11 @@ import sqlalchemy
 from sqlalchemy import Table, Column, String, DateTime, Enum, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 import os
-from libs.common.serializers import PostStatus, Platform
 import uuid
 import datetime
 
+# We probably want to share the main DB or have a separate one. 
+# For monorepo simplicity, we assume one shared Postgres instance but distinct tables.
 import urllib.parse
 
 DB_USER = os.getenv("DB_USER", "user")
@@ -23,24 +24,16 @@ database = databases.Database(DATABASE_URL)
 
 metadata = sqlalchemy.MetaData()
 
-Post = Table(
-    "posts",
+# In a real microservice, this would be its own DB. 
+# Here we namespace it or just use a distinct table.
+SocialCredential = Table(
+    "facebook_credentials",
     metadata,
     Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
-    Column("content", String),
-    Column("media_key", String, nullable=True),
-    Column("status", String, default=PostStatus.PENDING.value),
-    Column("user_id", String, index=True, nullable=True),
+    Column("user_id", String, index=True), # User ID from the main auth system (API Gateway)
+    Column("platform", String, default="facebook"),
+    Column("access_token", String), # Encrypted in real world
+    Column("page_id", String, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.datetime.utcnow),
-)
-
-PostTarget = Table(
-    "post_targets",
-    metadata,
-    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
-    Column("post_id", UUID(as_uuid=True), ForeignKey("posts.id")),
-    Column("platform", String),
-    Column("status", String, default="pending"),
-    Column("external_id", String, nullable=True),
 )

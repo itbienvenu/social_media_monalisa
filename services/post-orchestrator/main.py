@@ -22,13 +22,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
 
 @app.post("/posts", response_model=PostResponse)
-async def create_post(post_data: PostCreate):
+async def create_post(post_data: PostCreate, user_id: str = "anonymous"):
     # 1. Store in DB
     query = Post.insert().values(
         id=uuid.uuid4(),
         content=post_data.content,
         media_key=post_data.media_key,
-        status=PostStatus.PENDING,
+        status=PostStatus.PENDING.value,
+        user_id=user_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     ).returning(Post)
@@ -41,7 +42,7 @@ async def create_post(post_data: PostCreate):
     
     # 3. Publish Events
     for platform in post_data.platforms:
-        await publish_post_event(post['id'], platform, post_data.content, post_data.media_key)
+        await publish_post_event(post['id'], platform, post_data.content, post_data.media_key, user_id)
         
     return PostResponse(
         id=post['id'],
