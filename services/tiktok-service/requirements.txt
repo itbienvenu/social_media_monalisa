@@ -1,2 +1,10 @@
 asyncio
 pydantic
+aio-pika
+fastapi
+uvicorn
+httpx
+databases
+sqlalchemy
+asyncpg
+psycopg2-binary

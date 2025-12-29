@@ -7,6 +7,10 @@ from services.post_orchestrator.events import publish_post_event
 import uuid
 from datetime import datetime
 from contextlib import asynccontextmanager
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("post-orchestrator")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

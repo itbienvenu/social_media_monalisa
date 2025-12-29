@@ -7,7 +7,7 @@ from libs.common.messaging import MessageQueue
 logger = logging.getLogger("facebook-service")
 mq = MessageQueue("facebook-service")
 
-FACEBOOK_API_VERSION = "v18.0"
+FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v18.0")
 FACEBOOK_GRAPH_URL = f"https://graph.facebook.com/{FACEBOOK_API_VERSION}"
 MOCK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN", "mock-access-token")
 MOCK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "me")
@@ -38,6 +38,33 @@ class FacebookClient:
             if "mock" in self.access_token:
                 logger.warning("Mocking success despite API error (invalid token)")
                 return {"id": "mock_fb_post_id_12345"}
+            raise e
+        except httpx.RequestError as e:
+            logger.error(f"Network Error: {e}")
+            raise e
+
+    async def get_user_pages(self) -> list[dict]:
+        """
+        Fetches the pages the user manages and their access tokens.
+        """
+        url = f"{FACEBOOK_GRAPH_URL}/me/accounts"
+        params = {
+            "access_token": self.access_token,
+            "fields": "id,name,access_token,category"
+        }
+        try:
+            logger.info(f"Fetching user pages from: {url}")
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("data", [])
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Facebook API Error fetching pages: {e.response.text}")
+            if "mock" in self.access_token:
+                 return [
+                     {"id": "mock_page_1", "name": "Mock Page 1", "access_token": "mock_page_token_1", "category": "Test"},
+                     {"id": "mock_page_2", "name": "Mock Page 2", "access_token": "mock_page_token_2", "category": "Test"}
+                 ]
             raise e
         except httpx.RequestError as e:
             logger.error(f"Network Error: {e}")

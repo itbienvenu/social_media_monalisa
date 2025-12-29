@@ -33,7 +33,20 @@ SocialCredential = Table(
     Column("user_id", String, index=True), # User ID from the main auth system (API Gateway)
     Column("platform", String, default="facebook"),
     Column("access_token", String), # Encrypted in real world
-    Column("page_id", String, nullable=True),
+    Column("page_id", String, nullable=True), # Deprecated in favor of SocialTargets
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.datetime.utcnow),
+)
+
+SocialTarget = Table(
+    "facebook_targets",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("user_id", String, index=True),
+    Column("target_id", String), # Page ID or Group ID
+    Column("target_name", String),
+    Column("target_type", String), # 'page' or 'group'
+    Column("access_token", String), # Page Access Token
+    Column("platform", String, default="facebook"),
+    Column("created_at", DateTime, default=datetime.datetime.utcnow),
 )

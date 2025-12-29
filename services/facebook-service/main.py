@@ -34,63 +34,142 @@ app = FastAPI(title="Facebook Service", lifespan=lifespan)
 
 async def consume_loop():
     logger.info("Starting Facebook Service Consumer...")
-    await mq.subscribe("posts.facebook", handle_post_event)
+    while True:
+        try:
+            await mq.subscribe("posts.facebook", handle_post_event)
+            logger.info("Successfully subscribed to posts.facebook")
+            break # Exit retry loop once subscribed (subscription is persistent)
+        except Exception as e:
+            logger.error(f"Failed to subscribe to RabbitMQ: {e}. Retrying in 5s...")
+            await asyncio.sleep(5)
+            
     while True:
         await asyncio.sleep(1)
+
+from services.facebook_service.db import database, metadata, SocialCredential, SocialTarget
+from services.facebook_service.logic import post_to_facebook, FacebookClient
+
+# ... existing imports ...
 
 async def handle_post_event(message: dict):
     logger.info(f"Received post event: {message}")
     post_id = message.get("post_id")
     content = message.get("content")
-    # In a real system, the event should contain the user_id of the poster
-    # For now, we might assume a default user or mock it from the message if we add it to the message schema
-    # Let's assume the event sender (orchestrator) needs to be updated to send user_id.
-    # For this iteration, I'll mock looking up the FIRST credential found or specific one.
     user_id = message.get("user_id", "test-user") 
     
-    # Fetch token
-    query = SocialCredential.select().where(SocialCredential.c.user_id == user_id)
-    cred = await database.fetch_one(query)
+    # Fetch Page Token (Target)
+    # Strategy: Find the first 'page' target for this user
+    query = SocialTarget.select().where(
+        (SocialTarget.c.user_id == user_id) & 
+        (SocialTarget.c.target_type == "page")
+    )
+    target = await database.fetch_one(query)
     
-    if cred:
-        await post_to_facebook(post_id, content, cred['access_token'], cred['page_id'])
+    if target:
+        await post_to_facebook(post_id, content, target['access_token'], target['target_id'])
     else:
-        logger.error(f"No credentials found for user {user_id}")
-        await mq.publish("posts.facebook.failed", {"post_id": post_id, "reason": "no_credentials"})
+        # Fallback to User Token (which might fail for posting but good for logging)
+        # OR just error out because we want to enforce Page posting
+        logger.error(f"No Page target found for user {user_id}")
+        await mq.publish("posts.facebook.failed", {"post_id": post_id, "reason": "no_page_target_found"})
 
-# --- OAuth Endpoints ---
-
-@app.post("/auth/connect")
-async def connect_facebook(user_id: str):
-    """
-    Returns the URL to redirect the user to.
-    """
-    # MOCK implementation
-    # Real: Return f"https://www.facebook.com/v18.0/dialog/oauth?client_id={APP_ID}..."
-    return {"url": f"http://localhost:8000/auth/facebook/callback?code=mock_auth_code_for_{user_id}&state={user_id}"}
+# ...
 
 @app.get("/auth/callback")
 async def facebook_callback(code: str, state: str):
     """
-    Receives code, exchanges for token, stores it.
-    State is used as user_id for simplicity here.
+    Receives code, exchanges for token, fetches Pages, stores everything.
     """
-    user_id = state
-    # MOCK token exchange
-    mock_token = f"EAAB_mock_token_for_{user_id}"
-    mock_page_id = f"mock_page_{user_id}"
+    import httpx
+    import os
     
-    # Store in DB
+    FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID")
+    FACEBOOK_APP_SECRET = os.getenv("FACEBOOK_APP_SECRET")
+    
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing code")
+
+    user_access_token = None
+    
+    # 1. Exchange Code for Access Token
+    if FACEBOOK_APP_ID and FACEBOOK_APP_SECRET:
+        api_version = os.getenv("FACEBOOK_API_VERSION", "v18.0")
+        token_url = f"https://graph.facebook.com/{api_version}/oauth/access_token"
+        params = {
+            "client_id": FACEBOOK_APP_ID,
+            "redirect_uri": f"{Request.base_url}auth/callback", # Ensure this matches handling
+            "client_secret": FACEBOOK_APP_SECRET,
+            "code": code
+        }
+        # Note: Redirect URI in local dev might need to be hardcoded or passed via env if simple concatenation fails
+        # For this implementation we assume standard localhost callback pattern or flexible validation
+        # But commonly we just need the exact string configured in FB App.
+        # Let's try to infer or fallback.
+        params["redirect_uri"] = "http://localhost:8000/auth/facebook/callback" # This gets forwarded by gateway usually
+
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(token_url, params=params)
+                resp.raise_for_status()
+                user_access_token = resp.json().get("access_token")
+            except Exception as e:
+                logger.error(f"Failed to exchange token with Facebook: {e}")
+                if os.getenv("MOCK_MODE") == "true":
+                     logger.warning("Falling back to MOCK token due to error (MOCK_MODE=true)")
+                     pass
+                else:
+                    return {"status": "error", "reason": "auth_exchange_failed", "details": str(e)}
+
+    # Fallback for Mock Mode if configured and real exchange failed or keys missing
+    if not user_access_token:
+        if os.getenv("MOCK_MODE") == "true" or not (FACEBOOK_APP_ID and FACEBOOK_APP_SECRET):
+             user_access_token = f"EAAB_mock_user_token_for_{user_id}"
+        else:
+             raise HTTPException(status_code=500, detail="Facebook configuration missing and Not in Mock Mode")
+
+    # Store User Credential
     query = SocialCredential.insert().values(
         id=uuid.uuid4(),
         user_id=user_id,
         platform="facebook",
-        access_token=mock_token,
-        page_id=mock_page_id
+        access_token=user_access_token,
+        page_id=None 
     )
     await database.execute(query)
     
-    return {"status": "connected", "user_id": user_id}
+    # Fetch User Pages
+    client = FacebookClient(user_access_token, "me")
+    try:
+        pages = await client.get_user_pages()
+        logger.info(f"Found {len(pages)} pages for user {user_id}")
+        
+        for page in pages:
+            # Check for dupes if re-authing? For MVP we just insert and maybe fail or we should UPSERT.
+            # Simpler: Delete old targets for this user/platform first? 
+            # Ideally: UPSERT. databases/sqlalchemy async support for upsert varies. 
+            # We will catch unique violation or just insert. 
+            # Assuming Clean state for demo.
+            
+            t_query = SocialTarget.insert().values(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                target_id=page['id'],
+                target_name=page['name'],
+                target_type="page",
+                access_token=page['access_token'],
+                platform="facebook"
+            )
+            try:
+                await database.execute(t_query)
+            except Exception:
+                pass # Ignore dupes for now
+            
+    except Exception as e:
+        logger.error(f"Failed to fetch pages: {e}")
+    finally:
+        await client.close()
+    
+    return {"status": "connected", "user_id": user_id, "pages_fetched": len(pages) if 'pages' in locals() else 0}
 
 @app.get("/health")
 async def health():

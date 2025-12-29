@@ -3,9 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY requirements.txt .
-COPY services/linkedin-service/requirements.txt ./services/linkedin-service/requirements.txt
-
-RUN pip install --no-cache-dir -r services/linkedin-service/requirements.txt
+COPY services/linkedin-service/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY libs /app/libs
 COPY services/linkedin-service /app/services/linkedin_service

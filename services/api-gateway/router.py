@@ -56,6 +56,12 @@ async def connect_platform(platform: str, user_id: str):
     # In a real app, we'd have a service registry or switch case.
     if platform == "facebook":
         target_url = f"{FACEBOOK_SERVICE_URL}/auth/connect"
+    elif platform == "tiktok":
+        target_url = "http://tiktok-service:8000/auth/connect"
+    elif platform == "instagram":
+        target_url = "http://instagram-service:8000/auth/connect"
+    elif platform == "linkedin":
+        target_url = "http://linkedin-service:8000/auth/connect"
     else:
         raise HTTPException(status_code=400, detail="Platform not supported")
 
@@ -72,6 +78,12 @@ async def connect_platform(platform: str, user_id: str):
 async def platform_callback(platform: str, code: str, state: str):
     if platform == "facebook":
         target_url = f"{FACEBOOK_SERVICE_URL}/auth/callback"
+    elif platform == "tiktok":
+        target_url = "http://tiktok-service:8000/auth/callback"
+    elif platform == "instagram":
+        target_url = "http://instagram-service:8000/auth/callback"
+    elif platform == "linkedin":
+        target_url = "http://linkedin-service:8000/auth/callback"
     else:
         raise HTTPException(status_code=400, detail="Platform not supported")
         
