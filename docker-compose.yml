@@ -1,0 +1,97 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-social_platform}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend-network
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
+      - SECRET_KEY=${SECRET_KEY}
+    depends_on:
+      - db
+    networks:
+      - backend-network
+
+  post-orchestrator:
+    build:
+      context: .
+      dockerfile: services/post-orchestrator/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
+    depends_on:
+      - db
+    networks:
+      - backend-network
+
+  facebook-service:
+    build:
+      context: .
+      dockerfile: services/facebook-service/Dockerfile
+    environment:
+      - MOCK_MODE=true
+    networks:
+      - backend-network
+
+  tiktok-service:
+    build:
+      context: .
+      dockerfile: services/tiktok-service/Dockerfile
+    environment:
+      - MOCK_MODE=true
+    networks:
+      - backend-network
+
+  linkedin-service:
+    build:
+      context: .
+      dockerfile: services/linkedin-service/Dockerfile
+    environment:
+      - MOCK_MODE=true
+    networks:
+      - backend-network
+
+  analytics-collector:
+    build:
+      context: .
+      dockerfile: services/analytics-collector/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
+    depends_on:
+      - db
+    networks:
+      - backend-network
+
+  analytics-api:
+    build:
+      context: .
+      dockerfile: services/analytics-api/Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
+    depends_on:
+      - db
+    networks:
+      - backend-network
+
+volumes:
+  postgres_data:
+
+networks:
+  backend-network:
+    driver: bridge
