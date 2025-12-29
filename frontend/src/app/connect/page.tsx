@@ -89,15 +89,19 @@ export default function ConnectPage() {
                         </div>
 
                         {/* LinkedIn */}
-                        <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg opacity-50">
+                        <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
                             <div className="flex items-center space-x-3">
                                 <span className="text-2xl">💼</span>
                                 <div>
                                     <h3 className="font-semibold">LinkedIn</h3>
-                                    <p className="text-sm text-gray-500">Coming Soon</p>
+                                    <p className="text-sm text-gray-500">Personal Profile</p>
                                 </div>
                             </div>
-                            <button disabled className="px-4 py-2 bg-gray-300 text-white rounded cursor-not-allowed">
+                            <button
+                                onClick={() => handleConnect('linkedin')}
+                                disabled={loading}
+                                className="px-4 py-2 bg-blue-700 text-white rounded hover:bg-blue-800 disabled:opacity-50"
+                            >
                                 Connect
                             </button>
                         </div>

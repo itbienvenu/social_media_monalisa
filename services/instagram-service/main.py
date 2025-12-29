@@ -78,10 +78,24 @@ async def connect_instagram(user_id: str):
     """
     Redirects to Facebook Auth, but we track that the intent is Instagram connectivity.
     """
-    # Simply reuse the Facebook Auth URL structure, maybe with specific scopes
-    # Scopes needed: instagram_basic, instagram_content_publish, pages_show_list, pages_read_engagement
-    scopes = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
-    return {"url": f"http://localhost:8000/auth/instagram/callback?code=mock_fb_code_for_ig_{user_id}&state={user_id}&scopes={scopes}"}
+    import os
+    FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID")
+    # Use BASE_URL from env
+    base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    REDIRECT_URI = f"{base_url}/auth/instagram/callback"
+    
+    # Scopes needed for Instagram Graph API
+    SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
+    
+    auth_url = (
+        f"https://www.facebook.com/v18.0/dialog/oauth?"
+        f"client_id={FACEBOOK_APP_ID}&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"state={user_id}&"
+        f"scope={SCOPES}"
+    )
+    
+    return {"url": auth_url}
 
 @app.get("/auth/callback")
 async def instagram_callback(code: str, state: str):
@@ -91,15 +105,21 @@ async def instagram_callback(code: str, state: str):
     FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID")
     FACEBOOK_APP_SECRET = os.getenv("FACEBOOK_APP_SECRET")
     
+    if not code:
+         raise HTTPException(status_code=400, detail="Missing code")
+
+    user_id = state
+    
     user_access_token = None
     
     # 1. Exchange Code for Access Token (Same as FB)
     if FACEBOOK_APP_ID and FACEBOOK_APP_SECRET:
          api_version = os.getenv("FACEBOOK_API_VERSION", "v18.0")
+         base_url = os.getenv("BASE_URL", "http://localhost:8000")
          token_url = f"https://graph.facebook.com/{api_version}/oauth/access_token"
          params = {
              "client_id": FACEBOOK_APP_ID,
-             "redirect_uri": "http://localhost:8000/auth/instagram/callback", # Usually same as FB but route differs or handled unified
+             "redirect_uri": f"{base_url}/auth/instagram/callback",
              "client_secret": FACEBOOK_APP_SECRET,
              "code": code
          }

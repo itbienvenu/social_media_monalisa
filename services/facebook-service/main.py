@@ -82,9 +82,10 @@ async def connect_facebook(user_id: str):
     """
     import os
     FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID")
-    # Redirect URI for development. In production this should be a proper domain.
+    # Use BASE_URL from env or default to localhost
+    base_url = os.getenv("BASE_URL", "http://localhost:8000")
     # Should match the one configured in Facebook App > Facebook Login > Settings > Valid OAuth Redirect URIs
-    REDIRECT_URI = "http://localhost:8000/auth/facebook/callback" 
+    REDIRECT_URI = f"{base_url}/auth/facebook/callback"
     
     # Scopes for Page Management
     SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts,pages_manage_metadata"
@@ -130,8 +131,9 @@ async def facebook_callback(code: str, state: str):
         # Note: Redirect URI in local dev might need to be hardcoded or passed via env if simple concatenation fails
         # For this implementation we assume standard localhost callback pattern or flexible validation
         # But commonly we just need the exact string configured in FB App.
-        # Let's try to infer or fallback.
-        params["redirect_uri"] = "http://localhost:8000/auth/facebook/callback" # This gets forwarded by gateway usually
+        # Custom BASE_URL logic
+        base_url = os.getenv("BASE_URL", "http://localhost:8000")
+        params["redirect_uri"] = f"{base_url}/auth/facebook/callback"
 
         async with httpx.AsyncClient() as client:
             try:

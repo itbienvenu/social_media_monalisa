@@ -86,6 +86,7 @@ services:
       - DB_NAME=${POSTGRES_DB:-social_platform}
       - FACEBOOK_APP_ID=${FACEBOOK_APP_ID}
       - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
+      - BASE_URL=${BASE_URL:-http://localhost:8000}
     depends_on:
       - db
     restart: always
@@ -98,8 +99,14 @@ services:
       dockerfile: services/tiktok-service/Dockerfile
     env_file: .env
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
-      - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}/
+      - DB_USER=${POSTGRES_USER:-user}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-social_platform}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-user}:${RABBITMQ_PASSWORD:-password}@${RABBITMQ_HOST:-rabbitmq}:${RABBITMQ_PORT:-5672}/
+      - REDIS_URL=redis://redis:6379/1
+      - BASE_URL=${BASE_URL:-http://localhost:8000}
       - TIKTOK_CLIENT_KEY=${TIKTOK_CLIENT_KEY}
       - TIKTOK_CLIENT_SECRET=${TIKTOK_CLIENT_SECRET}
       - MOCK_MODE=${MOCK_MODE:-false}
@@ -116,7 +123,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=${BASE_URL:-http://localhost:8000}
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -139,6 +146,7 @@ services:
       - DB_NAME=${POSTGRES_DB:-social_platform}
       - LINKEDIN_CLIENT_ID=${LINKEDIN_CLIENT_ID}
       - LINKEDIN_CLIENT_SECRET=${LINKEDIN_CLIENT_SECRET}
+      - BASE_URL=${BASE_URL:-http://localhost:8000}
     networks:
       - backend-network
 
@@ -169,7 +177,6 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_NAME=${POSTGRES_DB:-social_platform}
-
     depends_on:
       - db
     networks:
@@ -188,6 +195,7 @@ services:
       - DB_NAME=${POSTGRES_DB:-social_platform}
       - FACEBOOK_APP_ID=${FACEBOOK_APP_ID}
       - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
+      - BASE_URL=${BASE_URL:-http://localhost:8000}
     networks:
       - backend-network
 

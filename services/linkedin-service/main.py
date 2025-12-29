@@ -63,17 +63,28 @@ async def handle_post_event(message: dict):
         logger.error(f"No credentials found for user {user_id}")
         await mq.publish("posts.linkedin.failed", {"post_id": post_id, "reason": "no_credentials"})
 
-# --- OAuth Endpoints ---
 
 @app.post("/auth/connect")
 async def connect_linkedin(user_id: str):
     """
     Returns LinkedIn OAuth URL.
     """
-    # Real URL: https://www.linkedin.com/oauth/v2/authorization...
-    # Scopes: w_member_social, r_liteprofile (or r_basicprofile)
-    scopes = "w_member_social,r_liteprofile"
-    return {"url": f"http://localhost:8000/auth/linkedin/callback?code=mock_linkedin_code_for_{user_id}&state={user_id}&scope={scopes}"}
+    import os
+    CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
+    base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    REDIRECT_URI = f"{base_url}/auth/linkedin/callback"
+    
+    SCOPES = "w_member_social,openid,profile,email"
+    
+    auth_url = (
+        f"https://www.linkedin.com/oauth/v2/authorization?"
+        f"response_type=code&"
+        f"client_id={CLIENT_ID}&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"state={user_id}&"
+        f"scope={SCOPES}"
+    )
+    return {"url": auth_url}
 
 @app.get("/auth/callback")
 async def linkedin_callback(code: str, state: str):
@@ -83,65 +94,72 @@ async def linkedin_callback(code: str, state: str):
     
     CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
     CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
+    base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    REDIRECT_URI = f"{base_url}/auth/linkedin/callback"
     
-    mock_urn = None
-    mock_token = None
+    if not code:
+         raise HTTPException(status_code=400, detail="Missing code")
+
+    access_token = None
+    urn = None
 
     if CLIENT_ID and CLIENT_SECRET:
          token_url = "https://www.linkedin.com/oauth/v2/accessToken"
          params = {
              "grant_type": "authorization_code",
              "code": code,
-             "redirect_uri": "http://localhost:8000/auth/linkedin/callback",
+             "redirect_uri": REDIRECT_URI,
              "client_id": CLIENT_ID,
              "client_secret": CLIENT_SECRET
          }
+         # LinkedIn expects Content-Type: application/x-www-form-urlencoded
          async with httpx.AsyncClient() as client:
              try:
-                 resp = await client.post(token_url, data=params) # LinkedIn wants POST form data? or params? Docs say POST x-www-form-urlencoded
+                 resp = await client.post(token_url, data=params)
                  resp.raise_for_status()
                  data = resp.json()
-                 mock_token = data.get("access_token")
+                 access_token = data.get("access_token")
                  expires_in = data.get("expires_in", 5184000) # 60 days
                  
-                 # Now fetch Profile to get URN
-                 if mock_token:
-                      headers = {"Authorization": f"Bearer {mock_token}"}
-                      p_resp = await client.get("https://api.linkedin.com/v2/me", headers=headers)
+                 # Fetch Profile via OIDC UserInfo endpoint
+                 if access_token:
+                      headers = {"Authorization": f"Bearer {access_token}"}
+                      # Modern OIDC endpoint
+                      p_resp = await client.get("https://api.linkedin.com/v2/userinfo", headers=headers)
                       p_resp.raise_for_status()
-                      # id is usually "person_urn_suffix" e.g "12345" result is "urn:li:person:12345"
-                      # or API returns full URN? v2/me returns "id"
                       p_data = p_resp.json()
-                      mock_urn = p_data.get("id") # Just the ID part usually
+                      urn = p_data.get("sub") # 'sub' is the member ID in OIDC
              except Exception as e:
                  logger.error(f"LinkedIn Auth Failed: {e}")
+                 # Fallback only if strictly in mock mode and actual auth failed
                  if os.getenv("MOCK_MODE") != "true":
-                      return {"status": "error", "reason": str(e)}
-
+                      return {"status": "error", "reason": "auth_exchange_failed", "details": str(e)}
+ 
     # Fallback / Mock
-    if not mock_token and os.getenv("MOCK_MODE") == "true":
-        mock_urn = f"mock_person_urn_{user_id}"
-        mock_token = f"atok_mock_linkedin_{user_id}"
+    if not access_token and os.getenv("MOCK_MODE") == "true":
+        urn = f"mock_person_urn_{user_id}"
+        access_token = f"atok_mock_linkedin_{user_id}"
     
-    if not mock_token:
-         raise HTTPException(status_code=500, detail="Auth failed")
+    if not access_token:
+         raise HTTPException(status_code=500, detail="LinkedIn Auth failed")
 
+    # Store Credential
     timestamp = datetime.datetime.utcnow()
-    expires_at = timestamp + datetime.timedelta(seconds=5184000) # Default 60 days
+    expires_at = timestamp + datetime.timedelta(seconds=5184000)
     
     query = SocialCredential.insert().values(
         id=uuid.uuid4(),
         user_id=user_id,
-        linkedin_urn=mock_urn, # If real, this is ID. Post Logic handles prefix.
-        access_token=mock_token,
-        refresh_token="ref_mock_li", # LinkedIn v2 access token is self-contained usually, refresh flow specific.
+        linkedin_urn=urn, 
+        access_token=access_token,
+        refresh_token=None,
         expires_at=expires_at,
         scope="w_member_social",
         platform="linkedin"
     )
     await database.execute(query)
     
-    return {"status": "connected", "user_id": user_id, "linkedin_urn": mock_urn}
+    return {"status": "connected", "user_id": user_id, "linkedin_urn": urn}
 
 @app.get("/health")
 async def health():
