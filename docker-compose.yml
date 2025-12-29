@@ -96,15 +96,33 @@ services:
     build:
       context: .
       dockerfile: services/tiktok-service/Dockerfile
+    env_file: .env
     environment:
-      - MOCK_MODE=${MOCK_MODE:-false}
-      - DB_USER=${POSTGRES_USER:-user}
-      - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=${POSTGRES_DB:-social_platform}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}/
       - TIKTOK_CLIENT_KEY=${TIKTOK_CLIENT_KEY}
       - TIKTOK_CLIENT_SECRET=${TIKTOK_CLIENT_SECRET}
+      - MOCK_MODE=${MOCK_MODE:-false}
+    depends_on:
+      - db
+      - rabbitmq
+    networks:
+      - backend-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    stdin_open: true
+    tty: true
+    command: npm run dev
     networks:
       - backend-network
 

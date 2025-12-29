@@ -75,6 +75,30 @@ async def handle_post_event(message: dict):
 
 # ...
 
+@app.post("/auth/connect")
+async def connect_facebook(user_id: str):
+    """
+    Returns the Facebook OAuth URL.
+    """
+    import os
+    FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID")
+    # Redirect URI for development. In production this should be a proper domain.
+    # Should match the one configured in Facebook App > Facebook Login > Settings > Valid OAuth Redirect URIs
+    REDIRECT_URI = "http://localhost:8000/auth/facebook/callback" 
+    
+    # Scopes for Page Management
+    SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts,pages_manage_metadata"
+    
+    auth_url = (
+        f"https://www.facebook.com/v18.0/dialog/oauth?"
+        f"client_id={FACEBOOK_APP_ID}&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"state={user_id}&"
+        f"scope={SCOPES}"
+    )
+    
+    return {"url": auth_url}
+
 @app.get("/auth/callback")
 async def facebook_callback(code: str, state: str):
     """
@@ -88,6 +112,8 @@ async def facebook_callback(code: str, state: str):
     
     if not code:
         raise HTTPException(status_code=400, detail="Missing code")
+
+    user_id = state
 
     user_access_token = None
     

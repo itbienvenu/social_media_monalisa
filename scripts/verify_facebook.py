@@ -18,7 +18,7 @@ async def verify_credentials():
     print(f"API Version: {API_VERSION}")
 
     if not APP_ID or not APP_SECRET:
-        print("❌ Error: credentials missing in .env")
+        print(" Error: credentials missing in .env")
         return
 
     url = f"https://graph.facebook.com/{API_VERSION}/oauth/access_token"
@@ -35,14 +35,14 @@ async def verify_credentials():
             
             if response.status_code == 200:
                 data = response.json()
-                print("✅ Success! Credentials are valid.")
+                print(" Success! Credentials are valid.")
                 print(f"App Access Token received: {data.get('access_token')[:10]}...")
             else:
-                print(f"❌ Failed! Status Code: {response.status_code}")
+                print(f" Failed! Status Code: {response.status_code}")
                 print(f"Response: {response.text}")
 
         except Exception as e:
-            print(f"❌ Exception occurred: {e}")
+            print(f" Exception occurred: {e}")
 
 if __name__ == "__main__":
     asyncio.run(verify_credentials())
