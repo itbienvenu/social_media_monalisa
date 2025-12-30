@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import sqlalchemy
 import uuid
@@ -33,6 +35,17 @@ async def lifespan(app: FastAPI):
     # await database.disconnect()
 
 app = FastAPI(title="Instagram Service", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://subacidly-ungrilled-rosy.ngrok-free.dev"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 async def consume_loop():
     logger.info("Starting Instagram Service Consumer...")
@@ -163,7 +176,9 @@ async def instagram_callback(code: str, state: str):
             except Exception:
                 pass
             
-        return {"status": "connected", "user_id": user_id, "accounts_linked": len(ig_accounts)}
+        # return {"status": "connected", "user_id": user_id, "accounts_linked": len(ig_accounts)}
+        redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
+        return RedirectResponse(url=redirect_url)
             
     except Exception as e:
         logger.error(f"Failed to fetch IG accounts: {e}")

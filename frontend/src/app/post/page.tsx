@@ -30,7 +30,10 @@ export default function PostPage() {
         try {
             const res = await fetch(`${API_URL}/posts`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer mock-token'
+                },
                 body: JSON.stringify({
                     user_id: USER_ID,
                     content: content,
@@ -41,7 +44,7 @@ export default function PostPage() {
             const data = await res.json();
 
             if (res.ok) {
-                setMessage(`Success! Post ID: ${data.post_id}`);
+                setMessage(`Success! Post ID: ${data.id}`);
                 setContent('');
                 setPlatforms([]);
             } else {
@@ -98,8 +101,8 @@ export default function PostPage() {
                                         type="button"
                                         onClick={() => togglePlatform(p)}
                                         className={`px-4 py-2 rounded-full border capitalize ${platforms.includes(p)
-                                                ? 'bg-blue-600 text-white border-blue-600'
-                                                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                                            ? 'bg-blue-600 text-white border-blue-600'
+                                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                                             }`}
                                     >
                                         {p}

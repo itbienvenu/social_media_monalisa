@@ -56,6 +56,9 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     depends_on:
       - db
+    volumes:
+      - ./services/api-gateway:/app/services/api_gateway
+      - ./libs:/app/libs
     networks:
       - backend-network
 
@@ -87,9 +90,14 @@ services:
       - FACEBOOK_APP_ID=${FACEBOOK_APP_ID}
       - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
       - BASE_URL=${BASE_URL:-http://localhost:8000}
+      - LOGIN_REDIRECT_URL=${LOGIN_REDIRECT_URL}
+      - MOCK_MODE=false
     depends_on:
       - db
     restart: always
+    volumes:
+      - ./services/facebook-service:/app/services/facebook_service
+      - ./libs:/app/libs
     networks:
       - backend-network
 
@@ -109,7 +117,8 @@ services:
       - BASE_URL=${BASE_URL:-http://localhost:8000}
       - TIKTOK_CLIENT_KEY=${TIKTOK_CLIENT_KEY}
       - TIKTOK_CLIENT_SECRET=${TIKTOK_CLIENT_SECRET}
-      - MOCK_MODE=${MOCK_MODE:-false}
+      - LOGIN_REDIRECT_URL=${LOGIN_REDIRECT_URL}
+      - MOCK_MODE=false
     depends_on:
       - db
       - rabbitmq
@@ -147,6 +156,7 @@ services:
       - LINKEDIN_CLIENT_ID=${LINKEDIN_CLIENT_ID}
       - LINKEDIN_CLIENT_SECRET=${LINKEDIN_CLIENT_SECRET}
       - BASE_URL=${BASE_URL:-http://localhost:8000}
+      - LOGIN_REDIRECT_URL=${LOGIN_REDIRECT_URL}
     networks:
       - backend-network
 
@@ -187,7 +197,7 @@ services:
       context: .
       dockerfile: services/instagram-service/Dockerfile
     environment:
-      - MOCK_MODE=${MOCK_MODE:-false}
+      - MOCK_MODE=false
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -196,6 +206,7 @@ services:
       - FACEBOOK_APP_ID=${FACEBOOK_APP_ID}
       - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
       - BASE_URL=${BASE_URL:-http://localhost:8000}
+      - LOGIN_REDIRECT_URL=${LOGIN_REDIRECT_URL}
     networks:
       - backend-network
 

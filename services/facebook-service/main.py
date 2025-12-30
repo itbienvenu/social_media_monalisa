@@ -1,6 +1,8 @@
 import asyncio
 import logging
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from services.facebook_service.logic import post_to_facebook
 from services.facebook_service.db import database, metadata, SocialCredential
 from libs.common.messaging import MessageQueue
@@ -31,6 +33,17 @@ async def lifespan(app: FastAPI):
     # await database.disconnect()
 
 app = FastAPI(title="Facebook Service", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://subacidly-ungrilled-rosy.ngrok-free.dev"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 async def consume_loop():
     logger.info("Starting Facebook Service Consumer...")
@@ -137,11 +150,21 @@ async def facebook_callback(code: str, state: str):
 
         async with httpx.AsyncClient() as client:
             try:
+                logger.info(f"Exchanging code for token at {token_url} with redirect_uri={params['redirect_uri']}")
                 resp = await client.get(token_url, params=params)
                 resp.raise_for_status()
                 user_access_token = resp.json().get("access_token")
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP Status Error: {e.response.status_code} - {e.response.text}")
+                return {
+                    "status": "error", 
+                    "reason": "auth_exchange_failed", 
+                    "details": f"Status: {e.response.status_code}, Body: {e.response.text}"
+                }
             except Exception as e:
+                import traceback
                 logger.error(f"Failed to exchange token with Facebook: {e}")
+                logger.error(traceback.format_exc())
                 if os.getenv("MOCK_MODE") == "true":
                      logger.warning("Falling back to MOCK token due to error (MOCK_MODE=true)")
                      pass
@@ -197,7 +220,8 @@ async def facebook_callback(code: str, state: str):
     finally:
         await client.close()
     
-    return {"status": "connected", "user_id": user_id, "pages_fetched": len(pages) if 'pages' in locals() else 0}
+    redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
+    return RedirectResponse(url=redirect_url)
 
 @app.get("/health")
 async def health():

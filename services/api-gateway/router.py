@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from libs.common.auth import verify_token
 from libs.common.serializers import PostCreate, PostResponse
 import httpx
@@ -89,7 +90,11 @@ async def platform_callback(platform: str, code: str, state: str):
         
     async with httpx.AsyncClient() as client:
         try:
-             response = await client.get(target_url, params={"code": code, "state": state})
+             response = await client.get(target_url, params={"code": code, "state": state}, timeout=30.0, follow_redirects=False)
+             
+             if response.status_code in (301, 302, 307, 308):
+                 return RedirectResponse(url=response.headers["location"], status_code=response.status_code)
+                 
              response.raise_for_status()
              return response.json()
         except httpx.RequestError as exc:
