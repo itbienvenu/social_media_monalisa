@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, ChangeEvent } from 'react';
 
 export default function PostPage() {
     const [content, setContent] = useState('');
@@ -7,9 +7,10 @@ export default function PostPage() {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [message, setMessage] = useState('');
     const [mediaUrl, setMediaUrl] = useState('');
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [uploadProgress, setUploadProgress] = useState(0);
 
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
-    const USER_ID = "test-user";
 
     const togglePlatform = (p: string) => {
         setPlatforms(prev =>
@@ -17,8 +18,52 @@ export default function PostPage() {
         );
     };
 
+    const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            setSelectedFile(e.target.files[0]);
+            setMediaUrl(''); // Reset manual URL if file selected
+        }
+    };
+
+    const uploadFile = async (file: File) => {
+        const token = localStorage.getItem('token');
+        if (!token) throw new Error("Not authenticated");
+
+        // 1. Get Presigned URL
+        const filename = `${Date.now()}-${file.name}`;
+        const res = await fetch(`${API_URL}/media/upload-url?filename=${filename}&content_type=${file.type}`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (!res.ok) throw new Error("Failed to get upload URL");
+
+        const { upload_url, public_url } = await res.json();
+
+        // 2. Upload to MinIO/S3
+        // Note: No Auth header for the direct PUT to S3/MinIO!
+        const uploadRes = await fetch(upload_url, {
+            method: 'PUT',
+            body: file,
+            headers: {
+                'Content-Type': file.type
+            }
+        });
+
+        if (!uploadRes.ok) throw new Error("Failed to upload file to storage");
+
+        return public_url;
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        const token = localStorage.getItem('token');
+
+        if (!token) {
+            window.location.href = '/login';
+            return;
+        }
+
         if (platforms.length === 0) {
             alert("Select at least one platform");
             return;
@@ -26,33 +71,56 @@ export default function PostPage() {
 
         setIsSubmitting(true);
         setMessage('');
+        setUploadProgress(10);
 
         try {
+            let finalMediaUrl = mediaUrl;
+
+            // Handle File Upload if selected
+            if (selectedFile) {
+                setMessage('Uploading image...');
+                finalMediaUrl = await uploadFile(selectedFile);
+                setUploadProgress(50);
+            }
+
+            // Validation for TikTok/Instagram
+            if ((platforms.includes('tiktok') || platforms.includes('instagram')) && !finalMediaUrl) {
+                throw new Error("Media is required for TikTok or Instagram!");
+            }
+
+            setMessage('Publishing post...');
+            // 3. Create Post
             const res = await fetch(`${API_URL}/posts`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer mock-token'
+                    'Authorization': `Bearer ${token}`
                 },
                 body: JSON.stringify({
-                    user_id: USER_ID,
                     content: content,
-                    media_url: mediaUrl || undefined, // Send undefined if empty
+                    media_key: finalMediaUrl || undefined,
                     platforms: platforms
                 })
             });
+
             const data = await res.json();
 
             if (res.ok) {
+                setUploadProgress(100);
                 setMessage(`Success! Post ID: ${data.id}`);
                 setContent('');
                 setPlatforms([]);
+                setSelectedFile(null);
+                setMediaUrl('');
+                setTimeout(() => {
+                    window.location.href = '/dashboard';
+                }, 1500);
             } else {
                 setMessage(`Error: ${data.detail || 'Failed to post'}`);
             }
-        } catch (err) {
+        } catch (err: any) {
             console.error(err);
-            setMessage('Network error occurred');
+            setMessage(err.message || 'Network error occurred');
         } finally {
             setIsSubmitting(false);
         }
@@ -74,21 +142,39 @@ export default function PostPage() {
                                 onChange={e => setContent(e.target.value)}
                                 className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 h-32"
                                 placeholder="What's on your mind?"
-                                required
                             />
                         </div>
 
-                        {/* Media URL (Temporary until we add upload) */}
+                        {/* File Upload */}
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Media URL (Optional)</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Upload Image/Video</label>
+                            <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:bg-gray-50 transition">
+                                <input
+                                    type="file"
+                                    onChange={handleFileChange}
+                                    accept="image/*,video/*"
+                                    className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                                />
+                                {selectedFile && <p className="mt-2 text-sm text-green-600">Selected: {selectedFile.name}</p>}
+                            </div>
+                        </div>
+
+                        {/* OR Manual URL */}
+                        <div className="relative flex py-2 items-center">
+                            <div className="flex-grow border-t border-gray-200"></div>
+                            <span className="flex-shrink-0 mx-4 text-gray-400 text-xs">OR USE URL</span>
+                            <div className="flex-grow border-t border-gray-200"></div>
+                        </div>
+
+                        <div>
                             <input
                                 type="url"
                                 value={mediaUrl}
                                 onChange={e => setMediaUrl(e.target.value)}
-                                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                disabled={!!selectedFile}
+                                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
                                 placeholder="https://example.com/image.jpg"
                             />
-                            <p className="text-xs text-gray-500 mt-1">Required for TikTok/Instagram</p>
                         </div>
 
                         {/* Platforms */}
@@ -100,8 +186,8 @@ export default function PostPage() {
                                         key={p}
                                         type="button"
                                         onClick={() => togglePlatform(p)}
-                                        className={`px-4 py-2 rounded-full border capitalize ${platforms.includes(p)
-                                            ? 'bg-blue-600 text-white border-blue-600'
+                                        className={`px-4 py-2 rounded-full border capitalize transition ${platforms.includes(p)
+                                            ? 'bg-blue-600 text-white border-blue-600 shadow-md transform scale-105'
                                             : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                                             }`}
                                     >
@@ -115,14 +201,18 @@ export default function PostPage() {
                         <button
                             type="submit"
                             disabled={isSubmitting}
-                            className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 disabled:opacity-50"
+                            className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 disabled:opacity-50 transition shadow-lg"
                         >
-                            {isSubmitting ? 'Publishing...' : 'Publish Now'}
+                            {isSubmitting ? (
+                                <span className="flex items-center justify-center gap-2">
+                                    Publishing... {uploadProgress > 0 && `${uploadProgress}%`}
+                                </span>
+                            ) : 'Publish Now'}
                         </button>
 
                         {/* Status Message */}
                         {message && (
-                            <div className={`p-4 rounded-lg mt-4 ${message.includes('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+                            <div className={`p-4 rounded-lg mt-4 text-center ${message.includes('Error') || message.includes('Failed') ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
                                 {message}
                             </div>
                         )}
@@ -130,7 +220,7 @@ export default function PostPage() {
                     </form>
 
                     <div className="mt-8 text-center">
-                        <a href="/" className="text-blue-500 hover:underline">← Back to Dashboard</a>
+                        <a href="/dashboard" className="text-blue-500 hover:underline">← Back to Dashboard</a>
                     </div>
                 </div>
             </div>

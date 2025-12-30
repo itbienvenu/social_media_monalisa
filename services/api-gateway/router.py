@@ -33,7 +33,23 @@ async def create_post(
              raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
+@router.get("/posts")
+async def list_posts(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+             response = await client.get(f"{POST_ORCHESTRATOR_URL}/posts", params={"user_id": user_id})
+             response.raise_for_status()
+             return response.json()
+        except httpx.RequestError:
+             raise HTTPException(status_code=503, detail="Service unavailable")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+@router.get("/posts/{post_id}")
 @router.get("/posts/{post_id}")
 async def get_post(post_id: str, user_info: dict = Depends(verify_token)):
     async with httpx.AsyncClient() as client:
@@ -47,7 +63,85 @@ async def get_post(post_id: str, user_info: dict = Depends(verify_token)):
              raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
 
+# --- Connections Management ---
+
+@router.get("/connections")
+async def get_connections(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    services = [
+        {"name": "facebook", "url": f"{FACEBOOK_SERVICE_URL}/credentials"},
+        {"name": "instagram", "url": "http://instagram-service:8000/credentials"},
+        {"name": "linkedin", "url": "http://linkedin-service:8000/credentials"},
+        {"name": "tiktok", "url": "http://tiktok-service:8000/credentials"},
+    ]
+    
+    results = []
+    async with httpx.AsyncClient() as client:
+        # We could run these in parallel with asyncio.gather
+        import asyncio
+        tasks = []
+        for svc in services:
+             tasks.append(client.get(svc['url'], params={"user_id": user_id}))
+        
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for i, resp in enumerate(responses):
+            platform = services[i]['name']
+            if isinstance(resp, Exception):
+                results.append({"platform": platform, "connected": False, "error": str(resp)})
+            elif resp.status_code == 200:
+                results.append(resp.json())
+            else:
+                 results.append({"platform": platform, "connected": False})
+                 
+    return results
+
+
+@router.delete("/connections/{platform}")
+async def delete_connection(platform: str, user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    
+    if platform == "facebook":
+        target_url = f"{FACEBOOK_SERVICE_URL}/credentials"
+    elif platform == "tiktok":
+        target_url = "http://tiktok-service:8000/credentials"
+    elif platform == "instagram":
+        target_url = "http://instagram-service:8000/credentials"
+    elif platform == "linkedin":
+        target_url = "http://linkedin-service:8000/credentials"
+    else:
+        raise HTTPException(status_code=400, detail="Platform not supported")
+        
+    async with httpx.AsyncClient() as client:
+        try:
+             resp = await client.delete(target_url, params={"user_id": user_id})
+             resp.raise_for_status()
+             return resp.json()
+        except httpx.HTTPError as e:
+             raise HTTPException(status_code=500, detail=str(e))
+
 # --- Auth Proxy ---
+
+@router.post("/auth/register")
+async def register_proxy(request: Request):
+    async with httpx.AsyncClient() as client:
+        try:
+            body = await request.json()
+            resp = await client.post("http://auth-service:8000/register", json=body)
+            return resp.json()
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/auth/login")
+async def login_proxy(request: Request):
+    async with httpx.AsyncClient() as client:
+        try:
+            body = await request.json()
+            resp = await client.post("http://auth-service:8000/login", json=body)
+            return resp.json()
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
 
 FACEBOOK_SERVICE_URL = "http://facebook-service:8000"
 

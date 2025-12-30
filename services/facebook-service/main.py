@@ -68,7 +68,10 @@ async def handle_post_event(message: dict):
     logger.info(f"Received post event: {message}")
     post_id = message.get("post_id")
     content = message.get("content")
-    user_id = message.get("user_id", "test-user") 
+    user_id = message.get("user_id")
+    if not user_id:
+        logger.error("User ID missing in message")
+        return 
     
     # Fetch Page Token (Target)
     # Strategy: Find the first 'page' target for this user
@@ -222,6 +225,23 @@ async def facebook_callback(code: str, state: str):
     
     redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
     return RedirectResponse(url=redirect_url)
+
+@app.get("/credentials")
+async def get_credentials(user_id: str):
+    query = SocialCredential.select().where(SocialCredential.c.user_id == user_id)
+    cred = await database.fetch_one(query)
+    if cred:
+        return {"connected": True, "platform": "facebook", "id": str(cred['id'])}
+    return {"connected": False, "platform": "facebook"}
+
+@app.delete("/credentials")
+async def delete_credentials(user_id: str):
+    query = SocialCredential.delete().where(SocialCredential.c.user_id == user_id)
+    await database.execute(query)
+    # Also delete targets
+    t_query = SocialTarget.delete().where(SocialTarget.c.user_id == user_id)
+    await database.execute(t_query)
+    return {"status": "deleted"}
 
 @app.get("/health")
 async def health():

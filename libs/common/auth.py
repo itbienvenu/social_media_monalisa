@@ -2,10 +2,6 @@ from typing import Optional
 from fastapi import Header, HTTPException, status
 
 async def verify_token(authorization: Optional[str] = Header(None)) -> dict:
-    """
-    Mock JWT verification.
-    Expects 'Bearer mock-token'.
-    """
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
@@ -18,11 +14,23 @@ async def verify_token(authorization: Optional[str] = Header(None)) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Invalid Authorization Scheme"
         )
+
+    # Real JWT Verification
+    from jose import jwt, JWTError
+    import os
     
-    if token != "mock-token":
-         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Invalid Token"
+    SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret")
+    ALGORITHM = "HS256"
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        return {"user_id": user_id, "email": payload.get("email")}
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-            
-    return {"user_id": "test-user", "role": "admin"}

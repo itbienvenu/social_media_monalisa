@@ -66,7 +66,10 @@ async def handle_post_event(message: dict):
     post_id = message.get("post_id")
     content = message.get("content")
     media_url = message.get("media_url")
-    user_id = message.get("user_id", "test-user")
+    user_id = message.get("user_id")
+    if not user_id:
+        logger.error("User ID missing in message")
+        return
     
     # Fetch User Credential (IG Target)
     # We look for an Instagram target
@@ -143,16 +146,10 @@ async def instagram_callback(code: str, state: str):
                 user_access_token = resp.json().get("access_token")
             except Exception as e:
                 logger.error(f"Failed to exchange token with Facebook for IG: {e}")
-                if os.getenv("MOCK_MODE") == "true":
-                     pass
-                else:
-                    return {"status": "error", "reason": "auth_exchange_failed", "details": str(e)}
+                raise HTTPException(status_code=500, detail=str(e))
 
     if not user_access_token:
-         if os.getenv("MOCK_MODE") == "true":
-             user_access_token = f"EAAB_mock_user_token_for_{user_id}"
-         else:
-             raise HTTPException(status_code=500, detail="Configuration missing or Auth failed")
+         raise HTTPException(status_code=500, detail="Configuration missing or Auth failed")
     
     # 1. Fetch connected IG Business Accounts
     client = InstagramClient(user_access_token, "me") # "me" only for account fetch context
@@ -177,7 +174,6 @@ async def instagram_callback(code: str, state: str):
                 pass
             
         # return {"status": "connected", "user_id": user_id, "accounts_linked": len(ig_accounts)}
-        redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
         return RedirectResponse(url=redirect_url)
             
     except Exception as e:
@@ -185,6 +181,20 @@ async def instagram_callback(code: str, state: str):
         return {"status": "error", "reason": str(e)}
     finally:
         await client.close()
+
+@app.get("/credentials")
+async def get_credentials(user_id: str):
+    query = SocialTarget.select().where(SocialTarget.c.user_id == user_id)
+    cred = await database.fetch_one(query)
+    if cred:
+        return {"connected": True, "platform": "instagram", "id": str(cred['id'])}
+    return {"connected": False, "platform": "instagram"}
+
+@app.delete("/credentials")
+async def delete_credentials(user_id: str):
+    query = SocialTarget.delete().where(SocialTarget.c.user_id == user_id)
+    await database.execute(query)
+    return {"status": "deleted"}
 
 @app.get("/health")
 async def health():

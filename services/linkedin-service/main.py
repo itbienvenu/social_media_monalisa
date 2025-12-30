@@ -64,7 +64,10 @@ async def handle_post_event(message: dict):
     post_id = message.get("post_id")
     content = message.get("content")
     media_url = message.get("media_url")
-    user_id = message.get("user_id", "test-user")
+    user_id = message.get("user_id")
+    if not user_id:
+        logger.error("User ID missing in message")
+        return
     
     # Fetch User Credential
     query = SocialCredential.select().where(SocialCredential.c.user_id == user_id)
@@ -175,6 +178,20 @@ async def linkedin_callback(code: str, state: str):
     # return {"status": "connected", "user_id": user_id, "linkedin_urn": urn}
     redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
     return RedirectResponse(url=redirect_url)
+
+@app.get("/credentials")
+async def get_credentials(user_id: str):
+    query = SocialCredential.select().where(SocialCredential.c.user_id == user_id)
+    cred = await database.fetch_one(query)
+    if cred:
+        return {"connected": True, "platform": "linkedin", "id": str(cred['id'])}
+    return {"connected": False, "platform": "linkedin"}
+
+@app.delete("/credentials")
+async def delete_credentials(user_id: str):
+    query = SocialCredential.delete().where(SocialCredential.c.user_id == user_id)
+    await database.execute(query)
+    return {"status": "deleted"}
 
 @app.get("/health")
 async def health():

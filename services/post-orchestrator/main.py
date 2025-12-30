@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
 
 @app.post("/posts", response_model=PostResponse)
-async def create_post(post_data: PostCreate, user_id: str = "anonymous"):
+async def create_post(post_data: PostCreate, user_id: str):
     # 1. Store in DB
     query = Post.insert().values(
         id=uuid.uuid4(),
@@ -76,6 +76,26 @@ async def get_post(post_id: uuid.UUID):
         updated_at=post['updated_at']
     )
 
+@app.get("/posts", response_model=list[PostResponse])
+async def list_posts(user_id: str):
+    query = Post.select().where(Post.c.user_id == user_id).order_by(Post.c.created_at.desc())
+    posts = await database.fetch_all(query)
+    
+    return [
+        PostResponse(
+            id=p['id'],
+            content=p['content'],
+            media_key=p['media_key'],
+            platforms=[Platform.FACEBOOK], # Mocked for list view for now
+            status=PostStatus(p['status']),
+            created_at=p['created_at'],
+            updated_at=p['updated_at']
+        ) for p in posts
+    ]
+
 @app.post("/media/upload-url")
-async def get_upload_url(filename: str):
-    return {"url": generate_upload_url(filename), "key": filename}
+async def get_upload_url(filename: str, content_type: str = "image/jpeg"):
+    result = generate_upload_url(filename, content_type)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to generate upload URL")
+    return result
