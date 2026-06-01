@@ -30,21 +30,8 @@ export default function SocialConnectModal({ isOpen, onClose }: SocialConnectMod
             return;
         }
 
-        // Extract user_id from token to emulate the "legacy" behavior of passing it in query
-        let userId = "test-user"; // Default fallback
         try {
-            // Simple JWT decode to get "sub" (user_id)
-            const payload = JSON.parse(atob(token.split('.')[1]));
-            if (payload.sub) {
-                userId = payload.sub;
-            }
-        } catch (e) {
-            console.warn("Could not parse token for user_id, using fallback");
-        }
-
-        try {
-            // "apply it here on dashboard": passing user_id exactly as requested
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/${platform}/connect?user_id=${userId}`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/${platform}/connect`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -72,11 +59,7 @@ export default function SocialConnectModal({ isOpen, onClose }: SocialConnectMod
             console.error("Connection error:", e);
             alert("An error occurred while connecting.");
         } finally {
-            // We don't clear loading immediately if success, as page redirects
-            // But if we are here, likely error or quick return
-            if (!window.location.href.includes('http')) {
-                setLoadingPlatform(null);
-            }
+            setLoadingPlatform(null);
         }
     };
 

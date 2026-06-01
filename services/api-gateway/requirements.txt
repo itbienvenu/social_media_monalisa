@@ -4,5 +4,4 @@ python-multipart
 httpx
 pydantic
 # jose
-python-jose
 python-jose[cryptography]

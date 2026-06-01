@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, Request, Header, Response
 from fastapi.responses import RedirectResponse, JSONResponse
 from libs.common.auth import verify_token
 from libs.common.serializers import PostCreate, PostResponse
@@ -33,24 +33,16 @@ async def create_post(
              raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
 @router.post("/posts/sync")
 async def sync_posts_endpoint(
     user_id: str = None,
-    authorization: str = Header(None)
+    user_info: dict = Depends(verify_token)
 ):
-    if not user_id and authorization:
-         try:
-             from libs.common.auth import verify_token
-             user_info = await verify_token(authorization)
-             user_id = user_info.get("user_id")
-         except Exception:
-             pass
-
-    if not user_id:
-        raise HTTPException(status_code=400, detail="User ID is required")
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
 
     async with httpx.AsyncClient() as client:
         try:
@@ -69,18 +61,12 @@ async def sync_posts_endpoint(
 @router.get("/posts")
 async def list_posts(
     user_id: str = None,
-    authorization: str = Header(None)
+    user_info: dict = Depends(verify_token)
 ):
-    if not user_id and authorization:
-         try:
-             from libs.common.auth import verify_token
-             user_info = await verify_token(authorization)
-             user_id = user_info.get("user_id")
-         except Exception:
-             pass
-
-    if not user_id:
-        raise HTTPException(status_code=400, detail="User ID is required")
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
 
     async with httpx.AsyncClient() as client:
         try:
@@ -92,7 +78,6 @@ async def list_posts(
         except httpx.HTTPStatusError as exc:
              raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
-@router.get("/posts/{post_id}")
 @router.get("/posts/{post_id}")
 async def get_post(post_id: str, user_info: dict = Depends(verify_token)):
     async with httpx.AsyncClient() as client:
@@ -111,18 +96,12 @@ async def get_post(post_id: str, user_info: dict = Depends(verify_token)):
 @router.get("/connections")
 async def get_connections(
     user_id: str = None,
-    authorization: str = Header(None)
+    user_info: dict = Depends(verify_token)
 ):
-    if not user_id and authorization:
-         try:
-             from libs.common.auth import verify_token
-             user_info = await verify_token(authorization)
-             user_id = user_info.get("user_id")
-         except Exception:
-             pass
-
-    if not user_id:
-        raise HTTPException(status_code=400, detail="User ID is required")
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
     services = [
         {"name": "facebook", "url": f"{FACEBOOK_SERVICE_URL}/credentials"},
         {"name": "instagram", "url": "http://instagram-service:8000/credentials"},
@@ -201,10 +180,15 @@ async def login_proxy(request: Request):
 # --- Media Proxy ---
 
 @router.post("/media/upload-url")
-async def upload_url_proxy(request: Request):
+async def upload_url_proxy(
+    request: Request,
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
     async with httpx.AsyncClient() as client:
         try:
             params = dict(request.query_params)
+            params["user_id"] = user_id
             resp = await client.post(
                 f"{POST_ORCHESTRATOR_URL}/media/upload-url",
                 params=params,
@@ -212,6 +196,19 @@ async def upload_url_proxy(request: Request):
             )
             resp.raise_for_status()
             return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/uploads/{bucket}/{key:path}")
+async def get_upload_proxy(bucket: str, key: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            minio_url = f"http://minio:9000/{bucket}/{key}"
+            resp = await client.get(minio_url)
+            resp.raise_for_status()
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
         except httpx.HTTPError as e:
@@ -225,28 +222,12 @@ FACEBOOK_SERVICE_URL = "http://facebook-service:8000"
 async def connect_platform(
     platform: str, 
     user_id: str = None,
-    authorization: str = Header(None)
+    user_info: dict = Depends(verify_token)
 ):
-    # logic from connect/page.tsx implies user_id is passed in query.
-    # We allow it, OR we try to get it from token if present (best effort).
-    
-    if not user_id and authorization:
-         try:
-             scheme, _, token = authorization.partition(" ")
-             if scheme.lower() == "bearer":
-                 from jose import jwt
-                 # Quick decode to find subject without checking signature strictly if we are in "legacy mode"
-                 # But ideally we verify. For now, let's respect that the user might just want the flow to work.
-                 # Let's try verify first.
-                 from libs.common.auth import verify_token
-                 user_info = await verify_token(authorization)
-                 user_id = user_info.get("user_id")
-         except Exception:
-             # If token fails (e.g. 401), we ignore it IF user_id was provided.
-             pass
-
-    if not user_id:
-        raise HTTPException(status_code=400, detail="User ID is required (via query param or valid token)")
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
 
     # Proxy to the specific platform service
     # In a real app, we'd have a service registry or switch case.

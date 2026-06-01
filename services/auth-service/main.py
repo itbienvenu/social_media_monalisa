@@ -1,3 +1,5 @@
+# pyright: ignore [reportMissingImport]
+from fastapi.responses import JSONResponse
 import logging
 import os
 import datetime
@@ -44,11 +46,32 @@ class UserProfile(BaseModel):
 
 import hashlib
 
-def verify_password(plain_password, hashed_password):
+def verify_password_versioned(plain_password: str, hashed_password: str) -> tuple[bool, bool]:
+    """
+    Verifies a password against the hash.
+    Returns (is_valid, needs_upgrade).
+    """
+    # 1. Try the new scheme: bcrypt of sha256
     pw_hash = hashlib.sha256(plain_password.encode("utf-8")).hexdigest()
-    return pwd_context.verify(pw_hash, hashed_password)
+    try:
+        if pwd_context.verify(pw_hash, hashed_password):
+            return True, False
+    except Exception:
+        pass
 
-def get_password_hash(password):
+    # 2. Try the old scheme: direct bcrypt of raw password
+    try:
+        if pwd_context.verify(plain_password, hashed_password):
+            return True, True
+    except Exception:
+        pass
+
+    return False, False
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return verify_password_versioned(plain_password, hashed_password)[0]
+
+def get_password_hash(password: str) -> str:
     pw_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
     return pwd_context.hash(pw_hash)
 
@@ -88,7 +111,7 @@ async def register(user: UserCreate):
         logger.error(f"Error registering user {user.email}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail="Internal server error"
         )
 
 @app.post("/login", response_model=Token)
@@ -97,12 +120,27 @@ async def login(user: UserCreate):
         query = users.select().where(users.c.email == user.email)
         db_user = await database.fetch_one(query)
         
-        if not db_user or not verify_password(user.password, db_user['hashed_password']):
+        if not db_user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+        is_valid, needs_upgrade = verify_password_versioned(user.password, db_user['hashed_password'])
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if needs_upgrade:
+            # Upgrade password to the new scheme in the database
+            new_hash = get_password_hash(user.password)
+            update_query = users.update().where(users.c.id == db_user['id']).values(hashed_password=new_hash)
+            await database.execute(update_query)
+            logger.info(f"Password upgraded to new scheme for user: {user.email}")
             
         access_token = create_access_token(data={"sub": db_user['id'], "email": db_user['email']})
         return {"access_token": access_token, "token_type": "bearer"}
@@ -112,7 +150,7 @@ async def login(user: UserCreate):
         logger.error(f"Error logging in user {user.email}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail="Internal server error"
         )
 
 @app.get("/me")
@@ -139,4 +177,7 @@ async def health():
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return {"status": "error", "database": "disconnected", "detail": str(e)}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "database": "disconnected", "detail": "Database connection error"}
+        )

@@ -114,6 +114,7 @@ async def post_to_facebook(post_id: str, content: str, access_token: str, page_i
                 await mq.publish("posts.facebook.success", {
                     "post_id": post_id, 
                     "status": "success",
+                    "platform": "facebook",
                     "platform_post_id": result.get("id")
                 })
                 break
@@ -128,6 +129,7 @@ async def post_to_facebook(post_id: str, content: str, access_token: str, page_i
         await mq.publish("posts.facebook.failed", {
             "post_id": post_id, 
             "status": "failed",
+            "platform": "facebook",
             "reason": str(e)
         })
     finally:

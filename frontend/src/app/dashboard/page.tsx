@@ -4,6 +4,19 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import SocialConnectModal from "../../components/SocialConnectModal";
 
+function decodeJwt(token: string) {
+    try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        return JSON.parse(jsonPayload);
+    } catch (e) {
+        return null;
+    }
+}
+
 function DashboardContent() {
     const router = useRouter();
     const [connections, setConnections] = useState<any[]>([]);
@@ -20,25 +33,24 @@ function DashboardContent() {
             return;
         }
 
-        // Extract user_id for legacy/lenient auth
-        let userId = "test-user";
-        try {
-            const payload = JSON.parse(atob(token.split('.')[1]));
-            if (payload.sub) userId = payload.sub;
-        } catch (e) {
-            console.warn("Failed to parse token for user_id");
+        const payload = decodeJwt(token);
+        if (!payload || !payload.sub) {
+            console.error("Invalid or unparseable token, redirecting to login");
+            localStorage.removeItem('token');
+            router.push('/login');
+            return;
         }
 
         const fetchData = async () => {
             try {
                 const [connRes, postsRes] = await Promise.all([
-                    fetch(`${process.env.NEXT_PUBLIC_API_URL}/connections?user_id=${userId}`, {
+                    fetch(`${process.env.NEXT_PUBLIC_API_URL}/connections`, {
                         headers: {
                             'Authorization': `Bearer ${token}`,
                             'ngrok-skip-browser-warning': 'true'
                         }
                     }),
-                    fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts?user_id=${userId}`, {
+                    fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`, {
                         headers: {
                             'Authorization': `Bearer ${token}`,
                             'ngrok-skip-browser-warning': 'true'
@@ -105,18 +117,21 @@ function DashboardContent() {
     const handleSync = async () => {
         setSyncLoading(true);
         const token = localStorage.getItem('token');
+        if (!token) {
+            router.push('/login');
+            return;
+        }
 
-        // Extract user_id
-        let userId = "test-user";
-        try {
-            if (token) {
-                const payload = JSON.parse(atob(token.split('.')[1]));
-                if (payload.sub) userId = payload.sub;
-            }
-        } catch (e) { }
+        const payload = decodeJwt(token);
+        if (!payload || !payload.sub) {
+            console.error("Invalid token, redirecting to login");
+            localStorage.removeItem('token');
+            router.push('/login');
+            return;
+        }
 
         try {
-            await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/sync?user_id=${userId}`, {
+            await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/sync`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -124,7 +139,7 @@ function DashboardContent() {
                 }
             });
             // Refresh posts
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts?user_id=${userId}`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'ngrok-skip-browser-warning': 'true'

@@ -16,7 +16,20 @@ async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: st
     # If services are outside the network, this needs to be an external URL.
     media_url = None
     if media_key:
-        media_url = f"{S3_ENDPOINT}/{S3_BUCKET}/{media_key}"
+        if media_key.startswith("http://") or media_key.startswith("https://"):
+            # Extract key and bucket from public_url if it's our own
+            # public_url format: f"{base_url}/uploads/{bucket}/{object_key}"
+            if "/uploads/" in media_key:
+                parts = media_key.split("/uploads/", 1)[1].split("/", 1)
+                if len(parts) == 2:
+                    bucket_name, obj_key = parts
+                    media_url = f"{S3_ENDPOINT}/{bucket_name}/{obj_key}"
+                else:
+                    media_url = media_key
+            else:
+                media_url = media_key
+        else:
+            media_url = f"{S3_ENDPOINT}/{S3_BUCKET}/{media_key}"
 
     event = {
         "post_id": str(post_id),

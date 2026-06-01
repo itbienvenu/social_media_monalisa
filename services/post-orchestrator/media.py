@@ -2,14 +2,39 @@ import boto3
 import os
 from botocore.exceptions import ClientError
 import logging
+import re
+import uuid
+from fastapi import HTTPException
 
 logger = logging.getLogger("post-orchestrator")
 
-def generate_upload_url(filename: str, content_type: str = "image/jpeg") -> str:
+def generate_upload_url(filename: str, user_id: str, content_type: str = "image/jpeg") -> dict:
     """
     Generates a pre-signed PUT URL for uploading to MinIO/S3.
     Returns the public URL where the file will be accessible.
     """
+    # Restrict allowed content-types
+    ALLOWED_CONTENT_TYPES = {
+        "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp",
+        "video/mp4", "video/mpeg", "video/quicktime", "video/webm"
+    }
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Content-Type not allowed")
+
+    # Validate/sanitize filename (no path separators, reasonable length)
+    safe_filename = os.path.basename(filename)
+    safe_filename = re.sub(r'[^a-zA-Z0-9_\.-]', '', safe_filename)
+    if len(safe_filename) > 100:
+        name, ext = os.path.splitext(safe_filename)
+        safe_filename = name[:100-len(ext)] + ext
+
+    if not safe_filename or safe_filename in (".", ".."):
+        safe_filename = "file"
+
+    # Enforce an object key scheme like uploads/{user_id}/{uuid}_{safe_filename}
+    file_uuid = uuid.uuid4()
+    object_key = f"uploads/{user_id}/{file_uuid}_{safe_filename}"
+
     s3_client = boto3.client(
         "s3",
         endpoint_url=os.getenv("MINIO_ENDPOINT", "http://minio:9000"),
@@ -46,7 +71,7 @@ def generate_upload_url(filename: str, content_type: str = "image/jpeg") -> str:
             'put_object',
             Params={
                 'Bucket': bucket,
-                'Key': filename,
+                'Key': object_key,
                 'ContentType': content_type
             },
             ExpiresIn=3600
@@ -60,9 +85,9 @@ def generate_upload_url(filename: str, content_type: str = "image/jpeg") -> str:
         if base_url.endswith("/"):
             base_url = base_url[:-1]
             
-        public_url = f"{base_url}/uploads/{bucket}/{filename}"
+        public_url = f"{base_url}/uploads/{bucket}/{object_key}"
         
-        return {"upload_url": presigned_url, "public_url": public_url, "key": filename}
+        return {"upload_url": presigned_url, "public_url": public_url, "key": object_key}
         
     except ClientError as e:
         logger.error(f"S3 Error: {e}")
