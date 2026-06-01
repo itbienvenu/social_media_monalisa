@@ -30,8 +30,19 @@ def generate_upload_url(filename: str, content_type: str = "image/jpeg") -> str:
              logger.error(f"Failed to create bucket: {e}")
 
     try:
+        # Create a client pointing to the public URL for presigned generation
+        # so the signed Host header matches the browser's Host header.
+        public_endpoint = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
+        presign_client = boto3.client(
+            "s3",
+            endpoint_url=public_endpoint,
+            aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+            aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
+            config=boto3.session.Config(signature_version='s3v4')
+        )
+
         # Generate presigned URL for uploading
-        presigned_url = s3_client.generate_presigned_url(
+        presigned_url = presign_client.generate_presigned_url(
             'put_object',
             Params={
                 'Bucket': bucket,
@@ -51,14 +62,7 @@ def generate_upload_url(filename: str, content_type: str = "image/jpeg") -> str:
             
         public_url = f"{base_url}/uploads/{bucket}/{filename}"
         
-        # For the upload_url (Frontend -> MinIO), we usually need the MinIO direct URL.
-        # But if the frontend is on localhost, presigned_url (which points to minio:9000 or defined endpoint) 
-        # might need adjustment if MINIO_ENDPOINT is internal.
-        # Let's assume the frontend can hit localhost:9000.
-        # We replace the internal hostname with localhost for the browser interaction
-        upload_url = presigned_url.replace("minio:9000", "localhost:9000")
-        
-        return {"upload_url": upload_url, "public_url": public_url, "key": filename}
+        return {"upload_url": presigned_url, "public_url": public_url, "key": filename}
         
     except ClientError as e:
         logger.error(f"S3 Error: {e}")

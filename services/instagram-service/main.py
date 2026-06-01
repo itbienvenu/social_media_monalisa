@@ -174,6 +174,7 @@ async def instagram_callback(code: str, state: str):
                 pass
             
         # return {"status": "connected", "user_id": user_id, "accounts_linked": len(ig_accounts)}
+        redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
         return RedirectResponse(url=redirect_url)
             
     except Exception as e:

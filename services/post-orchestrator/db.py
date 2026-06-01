@@ -33,6 +33,9 @@ Post = Table(
     Column("user_id", String, index=True, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.datetime.utcnow),
+    # New columns for historical sync
+    Column("external_id", String, nullable=True, index=True),
+    Column("platform", String, nullable=True),
 )
 
 PostTarget = Table(
