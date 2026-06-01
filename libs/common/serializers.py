@@ -15,6 +15,7 @@ class PostStatus(str, Enum):
     PROCESSING = "processing"
     PUBLISHED = "published"
     FAILED = "failed"
+    SYNCED = "synced"
 
 class PostBase(BaseModel):
     content: str

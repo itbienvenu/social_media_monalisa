@@ -280,7 +280,7 @@ async def sync_posts(user_id: str):
                             query = Post.insert().values(
                                 id=uuid.uuid4(),
                                 content=p['content'],
-                                status="synced", # Differentiate from our created posts
+                                status=PostStatus.SYNCED.value, # Differentiate from our created posts
                                 user_id=user_id,
                                 created_at=parse_iso_datetime(p['created_at']) if p.get('created_at') else datetime.utcnow(),
                                 external_id=p['original_id'],
