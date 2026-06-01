@@ -247,6 +247,51 @@ async def delete_credentials(user_id: str):
 async def health():
     return {"status": "ok"}
 
+@app.get("/feed")
+async def get_feed(user_id: str):
+    """
+    Fetches posts from the connected Facebook Page(s).
+    """
+    # 1. Get stored targets (Pages)
+    query = SocialTarget.select().where(
+        (SocialTarget.c.user_id == user_id) & 
+        (SocialTarget.c.target_type == "page")
+    ).limit(1) # Just get the first one for now
+    
+    target = await database.fetch_one(query)
+    
+    if not target:
+        # If no target, maybe check credentials and fetch/store targets?
+        # For now, just return empty list or error
+        return []
+    
+    # 2. Fetch posts
+    # We need a client. We can use the target access token directly.
+    # The client needs an init token, we can use the target's token or the user's credential token.
+    # Logic uses target token for page ops.
+    client = FacebookClient(target['access_token'], target['target_id'])
+    try:
+        posts = await client.get_page_posts(target['target_id'], target['access_token'])
+        
+        # Normalize response
+        normalized_posts = []
+        for p in posts:
+            if 'message' in p: # Only sync posts with text content for now?
+                normalized_posts.append({
+                    "original_id": p['id'],
+                    "content": p.get('message', ''),
+                    "created_at": p.get('created_time'),
+                    "platform": "facebook",
+                    "permalink": p.get('permalink_url')
+                })
+        return normalized_posts
+    except Exception as e:
+        logger.error(f"Error fetching feed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await client.close()
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

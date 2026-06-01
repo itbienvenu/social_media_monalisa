@@ -1,6 +1,6 @@
 import databases
 import sqlalchemy
-from sqlalchemy import Table, Column, String, DateTime, Enum, ForeignKey
+from sqlalchemy import Table, Column, String, DateTime, Enum, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 import os
 from libs.common.serializers import PostStatus, Platform
@@ -33,6 +33,10 @@ Post = Table(
     Column("user_id", String, index=True, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.datetime.utcnow),
+    # New columns for historical sync
+    Column("external_id", String, nullable=True, index=True),
+    Column("platform", String, nullable=True),
+    UniqueConstraint("user_id", "platform", "external_id", name="uq_user_platform_external_post"),
 )
 
 PostTarget = Table(

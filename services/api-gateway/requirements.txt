@@ -3,3 +3,5 @@ uvicorn
 python-multipart
 httpx
 pydantic
+# jose
+python-jose[cryptography]

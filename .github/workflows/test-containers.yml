@@ -1,0 +1,76 @@
+name: Test Containers Integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-containers:
+    name: Build & Verify Docker Containers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Environment File
+        run: |
+          cp .env.example .env
+          # Replace placeholder credentials with clean test values
+          sed -i 's/your_secret_key/github_actions_test_secret_key_123456789/g' .env
+
+      - name: Build & Run Containers
+        run: |
+          docker compose up -d --build
+
+      - name: Wait for Containers to Initialize
+        run: |
+          echo "Waiting 45 seconds for all services, database migrations, and message queues to boot..."
+          sleep 45
+
+      - name: Verify Running Container Status
+        run: |
+          echo "Current Container Status:"
+          docker compose ps
+          
+          # Inspect for crashed or exited containers
+          # If any container state is 'exited' or 'dead', list logs and fail the run
+          CRASHED_SERVICES=$(docker compose ps --format json | jq -r 'select(.State == "exited" or .State == "dead") | .Service' || true)
+          if [ ! -z "$CRASHED_SERVICES" ]; then
+            echo "Error: One or more docker services have crashed or exited: $CRASHED_SERVICES"
+            docker compose ps
+            echo "=== Listing Logs for all containers ==="
+            docker compose logs --tail=100
+            exit 1
+          fi
+          echo "All containers started successfully and are running!"
+
+      - name: Validate Auth Service Health Status
+        run: |
+          echo "Curling Auth Service /health endpoint..."
+          curl --fail --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8002/health || (
+            echo "=== Auth Service Log Output ==="
+            docker compose logs auth-service
+            exit 1
+          )
+
+      - name: Validate API Gateway Health & Documentation
+        run: |
+          echo "Curling API Gateway /docs Swagger UI endpoint..."
+          curl --fail --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8000/docs || (
+            echo "=== API Gateway Log Output ==="
+            docker compose logs api-gateway
+            exit 1
+          )
+
+      - name: Shutdown Containers
+        if: always()
+        run: |
+          docker compose down --volumes --remove-orphans

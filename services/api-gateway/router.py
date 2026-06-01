@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Header, Response
+from fastapi.responses import RedirectResponse, JSONResponse
 from libs.common.auth import verify_token
 from libs.common.serializers import PostCreate, PostResponse
 import httpx
@@ -33,12 +33,41 @@ async def create_post(
              raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+@router.post("/posts/sync")
+async def sync_posts_endpoint(
+    user_id: str = None,
+    user_info: dict = Depends(verify_token)
+):
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
+
+    async with httpx.AsyncClient() as client:
+        try:
+             response = await client.post(
+                 f"{POST_ORCHESTRATOR_URL}/posts/sync", 
+                 params={"user_id": user_id},
+                 timeout=20.0 # Sync might take longer
+             )
+             response.raise_for_status()
+             return response.json()
+        except httpx.RequestError:
+             raise HTTPException(status_code=503, detail="Service unavailable")
         except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
 @router.get("/posts")
-async def list_posts(user_info: dict = Depends(verify_token)):
-    user_id = user_info.get("user_id")
+async def list_posts(
+    user_id: str = None,
+    user_info: dict = Depends(verify_token)
+):
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
+
     async with httpx.AsyncClient() as client:
         try:
              response = await client.get(f"{POST_ORCHESTRATOR_URL}/posts", params={"user_id": user_id})
@@ -49,7 +78,6 @@ async def list_posts(user_info: dict = Depends(verify_token)):
         except httpx.HTTPStatusError as exc:
              raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
-@router.get("/posts/{post_id}")
 @router.get("/posts/{post_id}")
 async def get_post(post_id: str, user_info: dict = Depends(verify_token)):
     async with httpx.AsyncClient() as client:
@@ -66,8 +94,14 @@ async def get_post(post_id: str, user_info: dict = Depends(verify_token)):
 # --- Connections Management ---
 
 @router.get("/connections")
-async def get_connections(user_info: dict = Depends(verify_token)):
-    user_id = user_info.get("user_id")
+async def get_connections(
+    user_id: str = None,
+    user_info: dict = Depends(verify_token)
+):
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
     services = [
         {"name": "facebook", "url": f"{FACEBOOK_SERVICE_URL}/credentials"},
         {"name": "instagram", "url": "http://instagram-service:8000/credentials"},
@@ -128,7 +162,7 @@ async def register_proxy(request: Request):
         try:
             body = await request.json()
             resp = await client.post("http://auth-service:8000/register", json=body)
-            return resp.json()
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -138,15 +172,63 @@ async def login_proxy(request: Request):
         try:
             body = await request.json()
             resp = await client.post("http://auth-service:8000/login", json=body)
-            return resp.json()
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Media Proxy ---
+
+@router.post("/media/upload-url")
+async def upload_url_proxy(
+    request: Request,
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            params = dict(request.query_params)
+            params["user_id"] = user_id
+            resp = await client.post(
+                f"{POST_ORCHESTRATOR_URL}/media/upload-url",
+                params=params,
+                timeout=10.0
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/uploads/{bucket}/{key:path}")
+async def get_upload_proxy(bucket: str, key: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            minio_url = f"http://minio:9000/{bucket}/{key}"
+            resp = await client.get(minio_url)
+            resp.raise_for_status()
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
 
 
 FACEBOOK_SERVICE_URL = "http://facebook-service:8000"
 
 @router.post("/auth/{platform}/connect")
-async def connect_platform(platform: str, user_id: str):
+async def connect_platform(
+    platform: str, 
+    user_id: str = None,
+    user_info: dict = Depends(verify_token)
+):
+    token_user_id = user_info.get("user_id")
+    if user_id and user_id != token_user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
+    user_id = token_user_id
+
     # Proxy to the specific platform service
     # In a real app, we'd have a service registry or switch case.
     if platform == "facebook":

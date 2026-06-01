@@ -38,8 +38,8 @@ services:
       - "9000:9000"
       - "9001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadminpassword
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadminpassword}
     volumes:
       - minio_data:/data
     networks:
@@ -52,10 +52,17 @@ services:
     ports:
       - "8002:8000"
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
+      - DB_USER=${POSTGRES_USER:-user}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-social_platform}
       - SECRET_KEY=${SECRET_KEY}
     depends_on:
       - db
+    volumes:
+      - ./services/auth-service:/app/services/auth_service
+      - ./libs:/app/libs
     networks:
       - backend-network
 
@@ -87,13 +94,17 @@ services:
       - DB_PORT=5432
       - DB_NAME=${POSTGRES_DB:-social_platform}
       - MINIO_ENDPOINT=http://minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadminpassword
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadminpassword}
       - MINIO_BUCKET_NAME=uploads
       - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL:-http://localhost:9000}
       - BASE_URL=${BASE_URL:-http://localhost:8000}
     depends_on:
       - db
+    volumes:
+      - ./services/post-orchestrator:/app/services/post_orchestrator
+      - ./libs:/app/libs
+    command: uvicorn services.post_orchestrator.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - backend-network
 

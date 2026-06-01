@@ -70,6 +70,35 @@ class FacebookClient:
             logger.error(f"Network Error: {e}")
             raise e
 
+    async def get_page_posts(self, page_id: str, page_access_token: str) -> list[dict]:
+        """
+        Fetches posts from a specific page using its access token.
+        """
+        url = f"{FACEBOOK_GRAPH_URL}/{page_id}/feed"
+        params = {
+            "access_token": page_access_token,
+            "fields": "id,message,created_time,status_type,permalink_url",
+            "limit": 20
+        }
+        try:
+            logger.info(f"Fetching page posts from: {url}")
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("data", [])
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Facebook API Error fetching posts: {e.response.text}")
+            if "mock" in self.access_token or "mock" in page_access_token:
+                 # Mock Data
+                 return [
+                     {"id": "mock_post_1", "message": "First mock post from historical sync!", "created_time": "2023-12-01T12:00:00+0000", "permalink_url": "http://facebook.com/mock_post_1"},
+                     {"id": "mock_post_2", "message": "Another historical post.", "created_time": "2023-11-20T10:00:00+0000", "permalink_url": "http://facebook.com/mock_post_2"}
+                 ]
+            raise e
+        except httpx.RequestError as e:
+            logger.error(f"Network Error: {e}")
+            raise e
+
     async def close(self):
         await self.client.aclose()
 
@@ -85,6 +114,7 @@ async def post_to_facebook(post_id: str, content: str, access_token: str, page_i
                 await mq.publish("posts.facebook.success", {
                     "post_id": post_id, 
                     "status": "success",
+                    "platform": "facebook",
                     "platform_post_id": result.get("id")
                 })
                 break
@@ -99,6 +129,7 @@ async def post_to_facebook(post_id: str, content: str, access_token: str, page_i
         await mq.publish("posts.facebook.failed", {
             "post_id": post_id, 
             "status": "failed",
+            "platform": "facebook",
             "reason": str(e)
         })
     finally:
