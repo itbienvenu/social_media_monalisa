@@ -25,15 +25,38 @@ jobs:
           cp .env.example .env
           # Replace placeholder credentials with clean test values
           sed -i 's/your_secret_key/github_actions_test_secret_key_123456789/g' .env
+          sed -i 's/your_fb_app_id/test_fb_app_id/g' .env
+          sed -i 's/your_fb_app_secret/test_fb_app_secret/g' .env
+          sed -i 's/your_li_client_id/test_li_client_id/g' .env
+          sed -i 's/your_li_client_secret/test_li_client_secret/g' .env
+          sed -i 's/your_tt_client_key/test_tt_client_key/g' .env
+          sed -i 's/your_tt_client_secret/test_tt_client_secret/g' .env
+          sed -i 's/your_minio_access_key/minioadmin/g' .env
+          sed -i 's/your_minio_secret_key/minioadminpassword/g' .env
+          # Add CI-only defaults required by services
+          echo "MOCK_MODE=true" >> .env
+          echo "RABBITMQ_USER=user" >> .env
+          echo "RABBITMQ_PASSWORD=password" >> .env
+          echo "RABBITMQ_HOST=rabbitmq" >> .env
+          echo "RABBITMQ_PORT=5672" >> .env
+          echo "BASE_URL=http://localhost:8000" >> .env
+          echo "LOGIN_REDIRECT_URL=http://localhost:3000/callback" >> .env
 
       - name: Build & Run Containers
         run: |
-          docker compose up -d --build
+          docker compose up -d --build || (
+            echo "❌ Failed to build/start one or more containers."
+            echo "=== docker compose ps ==="
+            docker compose ps || true
+            echo "=== Recent logs (tail=200) ==="
+            docker compose logs --tail=200 || true
+            exit 1
+          )
 
       - name: Wait for Containers to Initialize
         run: |
-          echo "Waiting 45 seconds for all services, database migrations, and message queues to boot..."
-          sleep 45
+          echo "Waiting 60 seconds for all services, database migrations, and message queues to boot..."
+          sleep 60
 
       - name: Verify Running Container Status
         run: |
@@ -44,31 +67,114 @@ jobs:
           # If any container state is 'exited' or 'dead', list logs and fail the run
           CRASHED_SERVICES=$(docker compose ps --format json | jq -r 'select(.State == "exited" or .State == "dead") | .Service' || true)
           if [ ! -z "$CRASHED_SERVICES" ]; then
-            echo "Error: One or more docker services have crashed or exited: $CRASHED_SERVICES"
+            echo "❌ One or more Docker services crashed or exited: $CRASHED_SERVICES"
             docker compose ps
             echo "=== Listing Logs for all containers ==="
-            docker compose logs --tail=100
+            docker compose logs --tail=200
             exit 1
           fi
-          echo "All containers started successfully and are running!"
+          echo "✓ All containers started successfully and are running."
 
       - name: Validate Auth Service Health Status
         run: |
-          echo "Curling Auth Service /health endpoint..."
-          curl --fail --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8002/health || (
-            echo "=== Auth Service Log Output ==="
-            docker compose logs auth-service
+          echo "Checking Auth Service /health endpoint..."
+          curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8002/health || (
+            echo "❌ Auth service health check failed at http://localhost:8002/health"
+            echo "=== Auth Service Log Output (tail=200) ==="
+            docker compose logs auth-service --tail=200
             exit 1
           )
+          echo "✓ Auth service is healthy."
 
       - name: Validate API Gateway Health & Documentation
         run: |
-          echo "Curling API Gateway /docs Swagger UI endpoint..."
-          curl --fail --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8000/docs || (
-            echo "=== API Gateway Log Output ==="
-            docker compose logs api-gateway
+          echo "Checking API Gateway /docs endpoint..."
+          curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8000/docs || (
+            echo "❌ API Gateway documentation endpoint check failed at http://localhost:8000/docs"
+            echo "=== API Gateway Log Output (tail=200) ==="
+            docker compose logs api-gateway --tail=200
             exit 1
           )
+          echo "✓ API Gateway is reachable."
+
+      - name: Validate Analytics API Health
+        run: |
+          echo "Checking Analytics API /docs endpoint..."
+          curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8001/docs || (
+            echo "❌ Analytics API check failed at http://localhost:8001/docs"
+            echo "=== Analytics API Log Output (tail=200) ==="
+            docker compose logs analytics-api --tail=200
+            exit 1
+          )
+          echo "✓ Analytics API is reachable."
+
+      - name: Validate PostgreSQL Connectivity
+        run: |
+          docker compose exec -T db pg_isready -U user -d social_platform || (
+            echo "❌ PostgreSQL connectivity check failed."
+            echo "=== PostgreSQL Log Output (tail=200) ==="
+            docker compose logs db --tail=200
+            exit 1
+          )
+          echo "✓ PostgreSQL is accepting connections."
+
+      - name: Validate Redis Connectivity
+        run: |
+          docker compose exec -T redis redis-cli ping | grep -q "PONG" || (
+            echo "❌ Redis connectivity check failed."
+            echo "=== Redis Log Output (tail=200) ==="
+            docker compose logs redis --tail=200
+            exit 1
+          )
+          echo "✓ Redis connectivity check passed."
+
+      - name: Validate RabbitMQ Connectivity
+        run: |
+          docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping || (
+            echo "❌ RabbitMQ connectivity check failed."
+            echo "=== RabbitMQ Log Output (tail=200) ==="
+            docker compose logs rabbitmq --tail=200
+            exit 1
+          )
+          echo "✓ RabbitMQ connectivity check passed."
+
+      - name: Validate MinIO Connectivity
+        run: |
+          curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:9000/minio/health/live || (
+            echo "❌ MinIO connectivity check failed at http://localhost:9000/minio/health/live"
+            echo "=== MinIO Log Output (tail=200) ==="
+            docker compose logs minio --tail=200
+            exit 1
+          )
+          echo "✓ MinIO connectivity check passed."
+
+      - name: Validate Post Orchestrator Service
+        run: |
+          docker compose exec -T post-orchestrator python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs', timeout=10).read()" || (
+            echo "❌ Post Orchestrator endpoint check failed from inside container."
+            echo "=== Post Orchestrator Log Output (tail=200) ==="
+            docker compose logs post-orchestrator --tail=200
+            exit 1
+          )
+          echo "✓ Post Orchestrator is serving requests."
+
+      - name: Collect Container Logs
+        if: failure()
+        run: |
+          mkdir -p /tmp/container-logs
+          docker compose ps > /tmp/container-logs/compose-ps.txt || true
+          docker compose logs --no-color --tail=200 > /tmp/container-logs/compose-all.log || true
+          for service in auth-service api-gateway analytics-api post-orchestrator db redis rabbitmq minio; do
+            docker compose logs --no-color --tail=200 "$service" > "/tmp/container-logs/${service}.log" || true
+          done
+
+      - name: Upload Container Logs Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/container-logs
+          if-no-files-found: warn
 
       - name: Shutdown Containers
         if: always()
