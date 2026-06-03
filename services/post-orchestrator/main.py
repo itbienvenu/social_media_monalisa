@@ -106,6 +106,9 @@ async def lifespan(app: FastAPI):
                 if "platform" not in columns:
                     conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN platform VARCHAR"))
                     logger.info("Migrated schema: Added column platform to posts table")
+                if "media_keys" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN media_keys VARCHAR"))
+                    logger.info("Migrated schema: Added column media_keys to posts table")
                 
                 # Check and add unique constraint
                 # uq_user_platform_external_post unique constraint
@@ -164,11 +167,13 @@ app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
 
 @app.post("/posts", response_model=PostResponse)
 async def create_post(post_data: PostCreate, user_id: str):
+    import json
     # 1. Store in DB
     query = Post.insert().values(
         id=uuid.uuid4(),
         content=post_data.content,
         media_key=post_data.media_key,
+        media_keys=json.dumps(post_data.media_keys) if post_data.media_keys else None,
         status=PostStatus.PENDING.value,
         user_id=user_id,
         created_at=datetime.utcnow(),
@@ -196,7 +201,14 @@ async def create_post(post_data: PostCreate, user_id: str):
     for platform in post_data.platforms:
         platform_str = platform.value if hasattr(platform, "value") else str(platform)
         try:
-            await publish_post_event(post['id'], platform, post_data.content, post_data.media_key, user_id)
+            await publish_post_event(
+                post_id=post['id'], 
+                platform=platform, 
+                content=post_data.content, 
+                media_key=post_data.media_key, 
+                user_id=user_id,
+                media_keys=post_data.media_keys
+            )
             await log_post_stage(
                 database, post['id'], "orchestrator", "event_published", "INFO",
                 f"Successfully published post event to posts.{platform_str}"
@@ -211,6 +223,7 @@ async def create_post(post_data: PostCreate, user_id: str):
         id=post['id'],
         content=post['content'],
         media_key=post['media_key'],
+        media_keys=json.loads(post['media_keys']) if post['media_keys'] else None,
         platforms=post_data.platforms,
         status=PostStatus(post['status']),
         created_at=post['created_at'],
@@ -224,11 +237,13 @@ async def get_post(post_id: uuid.UUID):
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
         
+    import json
     # Mocking platforms fetching for read
     return PostResponse(
         id=post['id'],
         content=post['content'],
         media_key=post['media_key'],
+        media_keys=json.loads(post['media_keys']) if post['media_keys'] else None,
         platforms=[Platform.FACEBOOK], # Mocked
         status=PostStatus(post['status']),
         created_at=post['created_at'],
@@ -262,11 +277,13 @@ async def list_posts(user_id: str):
     query = Post.select().where(Post.c.user_id == user_id).order_by(Post.c.created_at.desc())
     posts = await database.fetch_all(query)
     
+    import json
     return [
         PostResponse(
             id=p['id'],
             content=p['content'],
             media_key=p['media_key'],
+            media_keys=json.loads(p['media_keys']) if p['media_keys'] else None,
             platforms=[Platform.FACEBOOK], # Mocked for list view for now
             status=PostStatus(p['status']),
             created_at=p['created_at'],
@@ -339,3 +356,64 @@ async def sync_posts(user_id: str):
                 logger.error(f"Failed to sync from {svc['name']}: {e}")
                 
     return {"status": "success", "synced_count": synced_count}
+
+
+@app.get("/posts/{post_id}/metrics")
+async def get_post_metrics(post_id: uuid.UUID, user_id: str):
+    """
+    Fetches engagement metrics for a post across all platforms.
+    """
+    import httpx
+    # 1. Fetch the post targets
+    query = "SELECT platform, external_id, status FROM post_targets WHERE post_id = :post_id"
+    targets = await database.fetch_all(query=query, values={"post_id": post_id})
+    
+    # Also fetch the post itself to see if it has historical sync attributes
+    post_query = Post.select().where(Post.c.id == post_id)
+    post = await database.fetch_one(post_query)
+    
+    metrics_by_platform = {}
+    total_metrics = {
+        "likes": 0,
+        "comments": 0,
+        "shares": 0,
+        "views": 0
+    }
+    
+    async with httpx.AsyncClient() as client:
+        # Check targets (created posts)
+        for target in targets:
+            platform = target["platform"]
+            ext_id = target["external_id"]
+            if ext_id:
+                # Call platform service
+                svc_url = f"http://{platform}-service:8000/posts/{ext_id}/metrics"
+                try:
+                    resp = await client.get(svc_url, params={"user_id": user_id})
+                    if resp.status_code == 200:
+                        p_metrics = resp.json()
+                        metrics_by_platform[platform] = p_metrics
+                        for k in total_metrics:
+                            total_metrics[k] += p_metrics.get(k, 0)
+                except Exception as e:
+                    logger.error(f"Failed to fetch metrics from {platform}-service for post {ext_id}: {e}")
+                    
+        # Check historical post itself if synced
+        if post and post["status"] == PostStatus.SYNCED.value and post["external_id"] and post["platform"]:
+            platform = post["platform"]
+            ext_id = post["external_id"]
+            svc_url = f"http://{platform}-service:8000/posts/{ext_id}/metrics"
+            try:
+                resp = await client.get(svc_url, params={"user_id": user_id})
+                if resp.status_code == 200:
+                    p_metrics = resp.json()
+                    metrics_by_platform[platform] = p_metrics
+                    for k in total_metrics:
+                        total_metrics[k] += p_metrics.get(k, 0)
+            except Exception as e:
+                logger.error(f"Failed to fetch metrics for synced post: {e}")
+                
+    return {
+        "platforms": metrics_by_platform,
+        "total": total_metrics
+    }

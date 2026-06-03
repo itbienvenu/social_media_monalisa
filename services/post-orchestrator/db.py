@@ -29,6 +29,7 @@ Post = Table(
     Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
     Column("content", String),
     Column("media_key", String, nullable=True),
+    Column("media_keys", String, nullable=True),
     Column("status", String, default=PostStatus.PENDING.value),
     Column("user_id", String, index=True, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),

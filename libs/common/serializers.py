@@ -20,6 +20,7 @@ class PostStatus(str, Enum):
 class PostBase(BaseModel):
     content: str
     media_key: Optional[str] = None
+    media_keys: Optional[List[str]] = None
     platforms: List[Platform]
 
 class PostCreate(PostBase):
@@ -38,6 +39,7 @@ class PlatformPostEvent(BaseModel):
     platform: Platform
     content: str
     media_url: Optional[str] = None
+    media_urls: Optional[List[str]] = None
     user_id: str
     
 class AnalyticsSnapshot(BaseModel):
