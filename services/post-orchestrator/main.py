@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import logging
+from libs.common.logger import log_post_stage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("post-orchestrator")
@@ -16,6 +17,10 @@ async def handle_post_success(data: dict, platform: str):
     post_id = data.get("post_id")
     platform_post_id = data.get("platform_post_id")
     logger.info(f"Received success event for post {post_id} on platform {platform}")
+    await log_post_stage(
+        database, post_id, "orchestrator", "platform_success", "INFO",
+        f"Platform '{platform}' posted successfully. External ID: {platform_post_id}"
+    )
     try:
         post_uuid = uuid.UUID(post_id)
         
@@ -43,6 +48,10 @@ async def handle_post_failed(data: dict, platform: str):
     post_id = data.get("post_id")
     reason = data.get("reason", "unknown error")
     logger.info(f"Received failed event for post {post_id} on platform {platform} due to: {reason}")
+    await log_post_stage(
+        database, post_id, "orchestrator", "platform_failed", "ERROR",
+        f"Platform '{platform}' posting failed. Reason: {reason}"
+    )
     try:
         post_uuid = uuid.UUID(post_id)
         
@@ -168,6 +177,11 @@ async def create_post(post_data: PostCreate, user_id: str):
     
     post = await database.fetch_one(query)
     
+    await log_post_stage(
+        database, post['id'], "orchestrator", "post_created", "INFO",
+        f"Post created in database. Targets: {[p.value if hasattr(p, 'value') else str(p) for p in post_data.platforms]}"
+    )
+    
     # 2. Store Metadata (Targets)
     for platform in post_data.platforms:
         target_query = PostTarget.insert().values(
@@ -180,7 +194,18 @@ async def create_post(post_data: PostCreate, user_id: str):
         
     # 3. Publish Events
     for platform in post_data.platforms:
-        await publish_post_event(post['id'], platform, post_data.content, post_data.media_key, user_id)
+        platform_str = platform.value if hasattr(platform, "value") else str(platform)
+        try:
+            await publish_post_event(post['id'], platform, post_data.content, post_data.media_key, user_id)
+            await log_post_stage(
+                database, post['id'], "orchestrator", "event_published", "INFO",
+                f"Successfully published post event to posts.{platform_str}"
+            )
+        except Exception as e:
+            await log_post_stage(
+                database, post['id'], "orchestrator", "event_publish_failed", "ERROR",
+                f"Failed to publish post event to posts.{platform_str}: {e}"
+            )
         
     return PostResponse(
         id=post['id'],
@@ -209,6 +234,28 @@ async def get_post(post_id: uuid.UUID):
         created_at=post['created_at'],
         updated_at=post['updated_at']
     )
+
+@app.get("/posts/{post_id}/logs")
+async def get_post_logs(post_id: uuid.UUID):
+    query = """
+        SELECT id, post_id, platform, stage, status, message, created_at
+        FROM post_logs
+        WHERE post_id = :post_id
+        ORDER BY created_at ASC
+    """
+    logs = await database.fetch_all(query=query, values={"post_id": post_id})
+    return [
+        {
+            "id": str(log["id"]),
+            "post_id": str(log["post_id"]),
+            "platform": log["platform"],
+            "stage": log["stage"],
+            "status": log["status"],
+            "message": log["message"],
+            "created_at": log["created_at"].isoformat() if log["created_at"] else None
+        }
+        for log in logs
+    ]
 
 @app.get("/posts", response_model=list[PostResponse])
 async def list_posts(user_id: str):

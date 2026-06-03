@@ -54,6 +54,26 @@ def generate_upload_url(filename: str, user_id: str, content_type: str = "image/
         except Exception as e:
              logger.error(f"Failed to create bucket: {e}")
 
+    # Set public-read policy on the bucket to allow anonymous downloads (resolved 403 Forbidden)
+    try:
+        import json
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "PublicRead",
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": ["s3:GetObject"],
+                    "Resource": [f"arn:aws:s3:::{bucket}/*"]
+                }
+            ]
+        }
+        s3_client.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
+        logger.info(f"Successfully set public-read policy on MinIO bucket: {bucket}")
+    except Exception as e:
+        logger.error(f"Failed to set public-read policy on bucket {bucket}: {e}")
+
     try:
         # Create a client pointing to the public URL for presigned generation
         # so the signed Host header matches the browser's Host header.

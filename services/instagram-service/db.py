@@ -34,3 +34,15 @@ SocialTarget = Table(
     Column("platform", String, default="instagram"),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
 )
+
+PostLog = Table(
+    "post_logs",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("post_id", UUID(as_uuid=True), nullable=True),
+    Column("platform", String),
+    Column("stage", String),
+    Column("status", String),
+    Column("message", String, nullable=True),
+    Column("created_at", DateTime, default=datetime.datetime.utcnow),
+)
