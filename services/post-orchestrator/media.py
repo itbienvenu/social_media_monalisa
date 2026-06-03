@@ -112,3 +112,42 @@ def generate_upload_url(filename: str, user_id: str, content_type: str = "image/
     except ClientError as e:
         logger.error(f"S3 Error: {e}")
         return None
+
+
+def delete_media_files(media_keys: list):
+    """
+    Deletes the listed media files from the MinIO bucket to free up storage.
+    """
+    if not media_keys:
+        return
+        
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=os.getenv("MINIO_ENDPOINT", "http://minio:9000"),
+        aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "test-value"),
+        aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "test-value"),
+        config=boto3.session.Config(signature_version='s3v4')
+    )
+    bucket = os.getenv("MINIO_BUCKET_NAME", "social-media-uploads")
+    
+    for key in media_keys:
+        if not key:
+            continue
+        # Extract object key if it's a full public URL
+        # Format: http://<domain>/uploads/<bucket>/uploads/<user_id>/<file>
+        obj_key = key
+        if str(key).startswith("http"):
+            parts = str(key).split(f"/uploads/{bucket}/")
+            if len(parts) > 1:
+                obj_key = parts[1]
+            else:
+                # Try general fallback to extract starting from "uploads/"
+                match = re.search(r'uploads/.*', str(key))
+                if match:
+                    obj_key = match.group(0)
+        
+        try:
+            s3_client.delete_object(Bucket=bucket, Key=obj_key)
+            logger.info(f"Successfully deleted local media file from MinIO: {obj_key}")
+        except Exception as e:
+            logger.error(f"Failed to delete media file {obj_key} from MinIO: {e}")

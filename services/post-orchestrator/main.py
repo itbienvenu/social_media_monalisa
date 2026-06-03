@@ -2,7 +2,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from libs.common.serializers import PostCreate, PostResponse, PostStatus, Platform
 from services.post_orchestrator.db import database, Post, PostTarget, metadata
 import sqlalchemy
-from services.post_orchestrator.media import generate_upload_url
+import asyncio
+from services.post_orchestrator.media import generate_upload_url, delete_media_files
 from services.post_orchestrator.events import publish_post_event, mq
 import uuid
 from datetime import datetime, timezone
@@ -16,7 +17,9 @@ logger = logging.getLogger("post-orchestrator")
 async def handle_post_success(data: dict, platform: str):
     post_id = data.get("post_id")
     platform_post_id = data.get("platform_post_id")
-    logger.info(f"Received success event for post {post_id} on platform {platform}")
+    cdn_urls = data.get("cdn_urls") or []
+    
+    logger.info(f"Received success event for post {post_id} on platform {platform}. CDN URLs count: {len(cdn_urls)}")
     await log_post_stage(
         database, post_id, "orchestrator", "platform_success", "INFO",
         f"Platform '{platform}' posted successfully. External ID: {platform_post_id}"
@@ -34,13 +37,40 @@ async def handle_post_success(data: dict, platform: str):
         )
         await database.execute(target_query)
 
-        # 2. Update main post status to published
-        query = Post.update().where(Post.c.id == post_uuid).values(
-            status=PostStatus.PUBLISHED.value,
-            updated_at=datetime.utcnow()
-        )
+        # 2. Get current local media_keys for cleanup and swap with CDN URLs
+        import json
+        
+        post_query = Post.select().where(Post.c.id == post_uuid)
+        existing_post = await database.fetch_one(post_query)
+        
+        original_keys = []
+        if existing_post and existing_post["media_keys"]:
+            try:
+                original_keys = json.loads(existing_post["media_keys"])
+            except Exception:
+                original_keys = [existing_post["media_keys"]]
+        
+        # Update main post status to published and swap media keys if CDN URLs exist
+        update_vals = {
+            "status": PostStatus.PUBLISHED.value,
+            "updated_at": datetime.utcnow()
+        }
+        
+        if cdn_urls:
+            update_vals["media_key"] = cdn_urls[0]
+            update_vals["media_keys"] = json.dumps(cdn_urls)
+            
+        query = Post.update().where(Post.c.id == post_uuid).values(**update_vals)
         await database.execute(query)
         logger.info(f"Successfully updated post {post_id} target ({platform}) to PUBLISHED in DB")
+        
+        # 3. Clean up the original local MinIO files since Facebook has copied them to its CDN
+        if cdn_urls and original_keys:
+            # Run cleanup in a separate thread/background task to avoid blocking the listener loop
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, delete_media_files, original_keys)
+            logger.info(f"Triggered background cleanup of {len(original_keys)} local MinIO files for post {post_id}")
+            
     except Exception as e:
         logger.error(f"Failed to update post success in DB: {e}")
 

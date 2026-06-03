@@ -397,6 +397,43 @@ class FacebookClient:
             logger.error(f"Network Error: {e}")
             raise e
 
+    async def get_post_attachments(self, platform_post_id: str) -> list[str]:
+        """
+        Fetches the permanent CDN image URLs associated with the published post.
+        """
+        url = f"{FACEBOOK_GRAPH_URL}/{platform_post_id}"
+        params = {
+            "access_token": self.access_token,
+            "fields": "attachments"
+        }
+        try:
+            logger.info(f"Fetching attachments for post {platform_post_id} from {url}")
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            cdn_urls = []
+            attachments = data.get("attachments", {}).get("data", [])
+            for att in attachments:
+                # Check for single image
+                media = att.get("media", {})
+                if media.get("image", {}).get("src"):
+                    cdn_urls.append(media["image"]["src"])
+                
+                # Check for subattachments (multiple photos post)
+                sub_atts = att.get("subattachments", {}).get("data", [])
+                for sub_att in sub_atts:
+                    sub_media = sub_att.get("media", {})
+                    if sub_media.get("image", {}).get("src"):
+                        cdn_urls.append(sub_media["image"]["src"])
+            
+            return cdn_urls
+        except Exception as e:
+            logger.error(f"Failed to fetch post attachments: {e}")
+            if "mock" in self.access_token:
+                 return ["https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800"]
+            return []
+
     async def close(self):
         await self.client.aclose()
 
@@ -419,11 +456,20 @@ async def post_to_facebook(post_id: str, content: str, access_token: str, page_i
                     f"Successfully published post to Facebook page {page_id}"
                 )
                 logger.info(f"Successfully posted {post_id} to Facebook: {result}")
+                
+                # Fetch Facebook CDN URLs
+                cdn_urls = []
+                try:
+                    cdn_urls = await client.get_post_attachments(result.get("id"))
+                except Exception as cdn_err:
+                    logger.warning(f"Could not retrieve post attachments CDN URLs: {cdn_err}")
+                
                 await mq.publish("posts.facebook.success", {
                     "post_id": post_id, 
                     "status": "success",
                     "platform": "facebook",
-                    "platform_post_id": result.get("id")
+                    "platform_post_id": result.get("id"),
+                    "cdn_urls": cdn_urls
                 })
                 break
             except Exception as e:
