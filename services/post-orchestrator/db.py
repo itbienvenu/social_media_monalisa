@@ -29,6 +29,7 @@ Post = Table(
     Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
     Column("content", String),
     Column("media_key", String, nullable=True),
+    Column("media_keys", String, nullable=True),
     Column("status", String, default=PostStatus.PENDING.value),
     Column("user_id", String, index=True, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
@@ -47,4 +48,16 @@ PostTarget = Table(
     Column("platform", String),
     Column("status", String, default="pending"),
     Column("external_id", String, nullable=True),
+)
+
+PostLog = Table(
+    "post_logs",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("post_id", UUID(as_uuid=True), nullable=True),
+    Column("platform", String),
+    Column("stage", String),
+    Column("status", String),
+    Column("message", String, nullable=True),
+    Column("created_at", DateTime, default=datetime.datetime.utcnow),
 )

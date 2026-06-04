@@ -1,13 +1,16 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from libs.common.serializers import PostCreate, PostResponse, PostStatus, Platform
-from services.post_orchestrator.db import database, Post, PostTarget, metadata
+from services.post_orchestrator.db import database, Post, PostTarget, PostLog, metadata
 import sqlalchemy
-from services.post_orchestrator.media import generate_upload_url
+import asyncio
+from services.post_orchestrator.media import generate_upload_url, delete_media_files, get_presigned_download_url
 from services.post_orchestrator.events import publish_post_event, mq
 import uuid
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+import json
 import logging
+from libs.common.logger import log_post_stage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("post-orchestrator")
@@ -15,7 +18,13 @@ logger = logging.getLogger("post-orchestrator")
 async def handle_post_success(data: dict, platform: str):
     post_id = data.get("post_id")
     platform_post_id = data.get("platform_post_id")
-    logger.info(f"Received success event for post {post_id} on platform {platform}")
+    cdn_urls = data.get("cdn_urls") or []
+    
+    logger.info(f"Received success event for post {post_id} on platform {platform}. CDN URLs count: {len(cdn_urls)}")
+    await log_post_stage(
+        database, post_id, "orchestrator", "platform_success", "INFO",
+        f"Platform '{platform}' posted successfully. External ID: {platform_post_id}"
+    )
     try:
         post_uuid = uuid.UUID(post_id)
         
@@ -29,13 +38,53 @@ async def handle_post_success(data: dict, platform: str):
         )
         await database.execute(target_query)
 
-        # 2. Update main post status to published
-        query = Post.update().where(Post.c.id == post_uuid).values(
-            status=PostStatus.PUBLISHED.value,
-            updated_at=datetime.utcnow()
-        )
+        # 2. Get current local media_keys for cleanup and swap with CDN URLs
+        import json
+        
+        post_query = Post.select().where(Post.c.id == post_uuid)
+        existing_post = await database.fetch_one(post_query)
+        
+        original_keys = []
+        if existing_post and existing_post["media_keys"]:
+            try:
+                original_keys = json.loads(existing_post["media_keys"])
+            except Exception:
+                original_keys = [existing_post["media_keys"]]
+        
+        # Update main post status to published and swap media keys if CDN URLs exist
+        update_vals = {
+            "status": PostStatus.PUBLISHED.value,
+            "updated_at": datetime.utcnow()
+        }
+        
+        if cdn_urls:
+            update_vals["media_key"] = cdn_urls[0]
+            update_vals["media_keys"] = json.dumps(cdn_urls)
+            
+        query = Post.update().where(Post.c.id == post_uuid).values(**update_vals)
         await database.execute(query)
         logger.info(f"Successfully updated post {post_id} target ({platform}) to PUBLISHED in DB")
+        
+        # 3. Clean up the original local MinIO files since Facebook has copied them to its CDN
+        if cdn_urls and original_keys:
+            local_keys_to_delete = [
+                k for k in original_keys
+                if isinstance(k, str) and (k.startswith("uploads/") or "/uploads/" in k)
+            ]
+            if local_keys_to_delete:
+                # Run cleanup in a separate thread/background task to avoid blocking the listener loop
+                loop = asyncio.get_running_loop()
+                fut = loop.run_in_executor(None, delete_media_files, local_keys_to_delete)
+                
+                def cleanup_done_callback(f):
+                    try:
+                        f.result()
+                    except Exception as cleanup_err:
+                        logger.error(f"Failed to delete media files during background cleanup for post {post_id}: {cleanup_err}")
+                
+                fut.add_done_callback(cleanup_done_callback)
+                logger.info(f"Triggered background cleanup of {len(local_keys_to_delete)} local MinIO files for post {post_id}")
+            
     except Exception as e:
         logger.error(f"Failed to update post success in DB: {e}")
 
@@ -43,6 +92,10 @@ async def handle_post_failed(data: dict, platform: str):
     post_id = data.get("post_id")
     reason = data.get("reason", "unknown error")
     logger.info(f"Received failed event for post {post_id} on platform {platform} due to: {reason}")
+    await log_post_stage(
+        database, post_id, "orchestrator", "platform_failed", "ERROR",
+        f"Platform '{platform}' posting failed. Reason: {reason}"
+    )
     try:
         post_uuid = uuid.UUID(post_id)
         
@@ -97,6 +150,9 @@ async def lifespan(app: FastAPI):
                 if "platform" not in columns:
                     conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN platform VARCHAR"))
                     logger.info("Migrated schema: Added column platform to posts table")
+                if "media_keys" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN media_keys VARCHAR"))
+                    logger.info("Migrated schema: Added column media_keys to posts table")
                 
                 # Check and add unique constraint
                 # uq_user_platform_external_post unique constraint
@@ -155,11 +211,21 @@ app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
 
 @app.post("/posts", response_model=PostResponse)
 async def create_post(post_data: PostCreate, user_id: str):
+    import json
+    
+    media_key = post_data.media_key
+    media_keys = post_data.media_keys
+    if not media_key and media_keys:
+        media_key = media_keys[0]
+    if not media_keys and media_key:
+        media_keys = [media_key]
+        
     # 1. Store in DB
     query = Post.insert().values(
         id=uuid.uuid4(),
         content=post_data.content,
-        media_key=post_data.media_key,
+        media_key=media_key,
+        media_keys=json.dumps(media_keys) if media_keys else None,
         status=PostStatus.PENDING.value,
         user_id=user_id,
         created_at=datetime.utcnow(),
@@ -167,6 +233,11 @@ async def create_post(post_data: PostCreate, user_id: str):
     ).returning(Post)
     
     post = await database.fetch_one(query)
+    
+    await log_post_stage(
+        database, post['id'], "orchestrator", "post_created", "INFO",
+        f"Post created in database. Targets: {[p.value if hasattr(p, 'value') else str(p) for p in post_data.platforms]}"
+    )
     
     # 2. Store Metadata (Targets)
     for platform in post_data.platforms:
@@ -179,13 +250,46 @@ async def create_post(post_data: PostCreate, user_id: str):
         await database.execute(target_query)
         
     # 3. Publish Events
+    failed_platforms = []
     for platform in post_data.platforms:
-        await publish_post_event(post['id'], platform, post_data.content, post_data.media_key, user_id)
-        
+        platform_str = platform.value if hasattr(platform, "value") else str(platform)
+        try:
+            await publish_post_event(
+                post_id=post['id'], 
+                platform=platform, 
+                content=post_data.content, 
+                media_key=post_data.media_key, 
+                user_id=user_id,
+                media_keys=post_data.media_keys
+            )
+            # Only emit event_published lifecycle stage after confirmed publish success
+            await log_post_stage(
+                database, post['id'], "orchestrator", "event_published", "INFO",
+                f"Successfully published post event to posts.{platform_str}"
+            )
+        except Exception as e:
+            failed_platforms.append((platform_str, str(e)))
+            
+    if failed_platforms:
+        # Roll back database changes for this post
+        try:
+            await database.execute(PostTarget.delete().where(PostTarget.c.post_id == post['id']))
+            await database.execute(PostLog.delete().where(PostLog.c.post_id == post['id']))
+            await database.execute(Post.delete().where(Post.c.id == post['id']))
+        except Exception as rollback_err:
+            logger.error(f"Rollback failed: {rollback_err}")
+            
+        error_details = ", ".join([f"{p}: {err}" for p, err in failed_platforms])
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to publish post event, rolling back: {error_details}"
+        )
+
     return PostResponse(
         id=post['id'],
         content=post['content'],
-        media_key=post['media_key'],
+        media_key=get_presigned_download_url(post['media_key']),
+        media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
         platforms=post_data.platforms,
         status=PostStatus(post['status']),
         created_at=post['created_at'],
@@ -199,27 +303,51 @@ async def get_post(post_id: uuid.UUID):
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
         
-    # Mocking platforms fetching for read
     return PostResponse(
         id=post['id'],
         content=post['content'],
-        media_key=post['media_key'],
+        media_key=get_presigned_download_url(post['media_key']),
+        media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
         platforms=[Platform.FACEBOOK], # Mocked
         status=PostStatus(post['status']),
         created_at=post['created_at'],
         updated_at=post['updated_at']
     )
 
+@app.get("/posts/{post_id}/logs")
+async def get_post_logs(post_id: uuid.UUID):
+    query = """
+        SELECT id, post_id, platform, stage, status, message, created_at
+        FROM post_logs
+        WHERE post_id = :post_id
+        ORDER BY created_at ASC
+    """
+    logs = await database.fetch_all(query=query, values={"post_id": post_id})
+    return [
+        {
+            "id": str(log["id"]),
+            "post_id": str(log["post_id"]),
+            "platform": log["platform"],
+            "stage": log["stage"],
+            "status": log["status"],
+            "message": log["message"],
+            "created_at": log["created_at"].isoformat() if log["created_at"] else None
+        }
+        for log in logs
+    ]
+
 @app.get("/posts", response_model=list[PostResponse])
 async def list_posts(user_id: str):
     query = Post.select().where(Post.c.user_id == user_id).order_by(Post.c.created_at.desc())
     posts = await database.fetch_all(query)
     
+    import json
     return [
         PostResponse(
             id=p['id'],
             content=p['content'],
-            media_key=p['media_key'],
+            media_key=get_presigned_download_url(p['media_key']),
+            media_keys=[get_presigned_download_url(k) for k in json.loads(p['media_keys'])] if p['media_keys'] else None,
             platforms=[Platform.FACEBOOK], # Mocked for list view for now
             status=PostStatus(p['status']),
             created_at=p['created_at'],
@@ -292,3 +420,59 @@ async def sync_posts(user_id: str):
                 logger.error(f"Failed to sync from {svc['name']}: {e}")
                 
     return {"status": "success", "synced_count": synced_count}
+
+
+@app.get("/posts/{post_id}/metrics")
+async def get_post_metrics(post_id: uuid.UUID, user_id: str):
+    """
+    Fetches engagement metrics for a post across all platforms.
+    """
+    import httpx
+    # 1. Fetch the post targets
+    query = "SELECT platform, external_id, status FROM post_targets WHERE post_id = :post_id"
+    targets = await database.fetch_all(query=query, values={"post_id": post_id})
+    
+    # Also fetch the post itself to see if it has historical sync attributes
+    post_query = Post.select().where(Post.c.id == post_id)
+    post = await database.fetch_one(post_query)
+    
+    metrics_by_platform = {}
+    total_metrics = {
+        "likes": 0,
+        "comments": 0,
+        "shares": 0,
+        "views": 0
+    }
+    async def fetch_one(client: httpx.AsyncClient, platform: str, ext_id: str):
+        svc_url = f"http://{platform}-service:8000/posts/{ext_id}/metrics"
+        try:
+            resp = await client.get(svc_url, params={"user_id": user_id}, timeout=5.0)
+            if resp.status_code == 200:
+                return platform, resp.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch metrics from {platform}-service for post {ext_id}: {e}")
+        return platform, None
+
+    async with httpx.AsyncClient() as client:
+        coros = []
+        for target in targets:
+            platform = target["platform"]
+            ext_id = target["external_id"]
+            if ext_id:
+                coros.append(fetch_one(client, platform, ext_id))
+                
+        if post and post["status"] == PostStatus.SYNCED.value and post["external_id"] and post["platform"]:
+            coros.append(fetch_one(client, post["platform"], post["external_id"]))
+            
+        if coros:
+            results = await asyncio.gather(*coros)
+            for platform, p_metrics in results:
+                if p_metrics and platform not in metrics_by_platform:
+                    metrics_by_platform[platform] = p_metrics
+                    for k in total_metrics:
+                        total_metrics[k] += p_metrics.get(k, 0)
+                        
+    return {
+        "platforms": metrics_by_platform,
+        "total": total_metrics
+    }

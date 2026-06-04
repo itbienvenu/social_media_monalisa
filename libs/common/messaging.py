@@ -52,6 +52,7 @@ class MessageQueue:
             logger.info(f"[{self.service_name}] Published to {topic}: {message}")
         except Exception as e:
             logger.error(f"[{self.service_name}] Failed to publish: {e}")
+            raise e
 
     async def subscribe(self, topic: str, handler):
         if not self.channel:

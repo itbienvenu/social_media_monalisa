@@ -9,6 +9,7 @@ from libs.common.messaging import MessageQueue
 import sqlalchemy
 from contextlib import asynccontextmanager
 import uuid
+from libs.common.logger import log_post_stage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("facebook-service")
@@ -69,9 +70,19 @@ async def handle_post_event(message: dict):
     post_id = message.get("post_id")
     content = message.get("content")
     user_id = message.get("user_id")
+    media_url = message.get("media_url")
+    media_urls = message.get("media_urls") or []
+    if not media_urls and media_url:
+        media_urls = [media_url]
+
     if not user_id:
         logger.error("User ID missing in message")
         return 
+    
+    await log_post_stage(
+        database, post_id, "facebook", "event_received", "INFO",
+        f"Event received by facebook-service. media_urls count: {len(media_urls)}"
+    )
     
     # Fetch Page Token (Target)
     # Strategy: Find the first 'page' target for this user
@@ -82,11 +93,15 @@ async def handle_post_event(message: dict):
     target = await database.fetch_one(query)
     
     if target:
-        await post_to_facebook(post_id, content, target['access_token'], target['target_id'])
+        await post_to_facebook(post_id, content, target['access_token'], target['target_id'], media_url=media_url, media_urls=media_urls)
     else:
         # Fallback to User Token (which might fail for posting but good for logging)
         # OR just error out because we want to enforce Page posting
         logger.error(f"No Page target found for user {user_id}")
+        await log_post_stage(
+            database, post_id, "facebook", "no_page_target", "ERROR",
+            f"Failed to post: No Facebook Page target/credentials found in database for user_id={user_id}"
+        )
         await mq.publish("posts.facebook.failed", {"post_id": post_id, "reason": "no_page_target_found"})
 
 # ...
@@ -287,6 +302,30 @@ async def get_feed(user_id: str):
         return normalized_posts
     except Exception as e:
         logger.error(f"Error fetching feed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await client.close()
+@app.get("/posts/{platform_post_id}/metrics")
+async def get_facebook_post_metrics(platform_post_id: str, user_id: str):
+    """
+    Fetches engagement metrics for a specific Facebook post.
+    """
+    # 1. Get stored targets (Pages)
+    query = SocialTarget.select().where(
+        (SocialTarget.c.user_id == user_id) & 
+        (SocialTarget.c.target_type == "page")
+    ).limit(1)
+    target = await database.fetch_one(query)
+    
+    if not target:
+        raise HTTPException(status_code=404, detail="No connected Page target found for metrics query")
+        
+    client = FacebookClient(target['access_token'], target['target_id'])
+    try:
+        metrics = await client.get_post_metrics(platform_post_id)
+        return metrics
+    except Exception as e:
+        logger.error(f"Error fetching metrics for {platform_post_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         await client.close()

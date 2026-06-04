@@ -7,7 +7,7 @@ export default function PostPage() {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [message, setMessage] = useState('');
     const [mediaUrl, setMediaUrl] = useState('');
-    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     const [uploadProgress, setUploadProgress] = useState(0);
 
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
@@ -19,9 +19,9 @@ export default function PostPage() {
     };
 
     const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            setSelectedFile(e.target.files[0]);
-            setMediaUrl(''); // Reset manual URL if file selected
+        if (e.target.files && e.target.files.length > 0) {
+            setSelectedFiles(Array.from(e.target.files));
+            setMediaUrl(''); // Reset manual URL if files selected
         }
     };
 
@@ -74,17 +74,21 @@ export default function PostPage() {
         setUploadProgress(10);
 
         try {
-            let finalMediaUrl = mediaUrl;
+            let finalMediaUrls: string[] = [];
 
-            // Handle File Upload if selected
-            if (selectedFile) {
-                setMessage('Uploading image...');
-                finalMediaUrl = await uploadFile(selectedFile);
-                setUploadProgress(50);
+            // Handle Multiple File Upload if selected
+            if (selectedFiles.length > 0) {
+                for (let i = 0; i < selectedFiles.length; i++) {
+                    setMessage(`Uploading image ${i + 1} of ${selectedFiles.length}...`);
+                    const url = await uploadFile(selectedFiles[i]);
+                    finalMediaUrls.push(url);
+                    setUploadProgress(Math.floor(10 + ((i + 1) / selectedFiles.length) * 40));
+                }
             }
 
             // Validation for TikTok/Instagram
-            if ((platforms.includes('tiktok') || platforms.includes('instagram')) && !finalMediaUrl) {
+            const hasMedia = finalMediaUrls.length > 0 || mediaUrl;
+            if ((platforms.includes('tiktok') || platforms.includes('instagram')) && !hasMedia) {
                 throw new Error("Media is required for TikTok or Instagram!");
             }
 
@@ -98,7 +102,8 @@ export default function PostPage() {
                 },
                 body: JSON.stringify({
                     content: content,
-                    media_key: finalMediaUrl || undefined,
+                    media_key: finalMediaUrls[0] || mediaUrl || undefined,
+                    media_keys: finalMediaUrls.length > 0 ? finalMediaUrls : (mediaUrl ? [mediaUrl] : undefined),
                     platforms: platforms
                 })
             });
@@ -110,7 +115,7 @@ export default function PostPage() {
                 setMessage(`Success! Post ID: ${data.id}`);
                 setContent('');
                 setPlatforms([]);
-                setSelectedFile(null);
+                setSelectedFiles([]);
                 setMediaUrl('');
                 setTimeout(() => {
                     window.location.href = '/dashboard';
@@ -151,11 +156,21 @@ export default function PostPage() {
                             <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:bg-gray-50 transition">
                                 <input
                                     type="file"
+                                    multiple
                                     onChange={handleFileChange}
                                     accept="image/*,video/*"
                                     className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
                                 />
-                                {selectedFile && <p className="mt-2 text-sm text-green-600">Selected: {selectedFile.name}</p>}
+                                {selectedFiles.length > 0 && (
+                                    <div className="mt-2 text-sm text-green-600 text-left">
+                                        <p className="font-semibold">{selectedFiles.length} file(s) selected:</p>
+                                        <ul className="list-disc list-inside text-xs mt-1">
+                                            {selectedFiles.map((f, i) => (
+                                                <li key={i}>{f.name}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -171,7 +186,7 @@ export default function PostPage() {
                                 type="url"
                                 value={mediaUrl}
                                 onChange={e => setMediaUrl(e.target.value)}
-                                disabled={!!selectedFile}
+                                disabled={selectedFiles.length > 0}
                                 className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
                                 placeholder="https://example.com/image.jpg"
                             />
