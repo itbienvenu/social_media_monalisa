@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -22,6 +22,16 @@ class PostBase(BaseModel):
     media_key: Optional[str] = None
     media_keys: Optional[List[str]] = None
     platforms: List[Platform]
+
+    @field_validator("media_keys")
+    @classmethod
+    def validate_media_keys(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None:
+            for item in v:
+                if not isinstance(item, str) or not item.strip():
+                    raise ValueError("media_keys list must not contain nulls or empty strings")
+        return v
+
 
 class PostCreate(PostBase):
     pass

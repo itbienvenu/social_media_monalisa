@@ -5,3 +5,4 @@ httpx
 pydantic
 # jose
 python-jose[cryptography]
+boto3

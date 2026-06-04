@@ -4,9 +4,12 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import SocialConnectModal from "../../components/SocialConnectModal";
 
-function decodeJwt(token: string) {
+function decodeJwt(token: string | null | undefined) {
+    if (!token) return null;
     try {
-        const base64Url = token.split('.')[1];
+        const parts = token.split('.');
+        if (parts.length < 2) return null;
+        const base64Url = parts[1];
         const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
         const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
             return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
@@ -159,14 +162,26 @@ function DashboardContent() {
     };
 
     const handleViewMetrics = async (post: any) => {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            router.push('/login');
+            return;
+        }
+
+        const payload = decodeJwt(token);
+        if (!payload || !payload.sub) {
+            console.error("Invalid token, redirecting to login");
+            localStorage.removeItem('token');
+            router.push('/login');
+            return;
+        }
+
         setActiveMetricsPost(post);
         setMetrics(null);
         setMetricsLoading(true);
-        const token = localStorage.getItem('token');
-        const payload = decodeJwt(token!);
         
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${post.id}/metrics?user_id=${payload.sub}`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${post.id}/metrics`, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'ngrok-skip-browser-warning': 'true'

@@ -33,7 +33,7 @@ async def log_post_stage(database: Any, post_id: Any, platform: str, stage: str,
 
     # Developer/local mode console highlighting
     import os
-    if os.getenv("DEV_MODE", "true").lower() in ("true", "1", "yes"):
+    if os.getenv("DEV_MODE", "false").lower() in ("true", "1", "yes"):
         color_map = {
             "INFO": "\033[92m",    # Green
             "WARNING": "\033[93m", # Yellow

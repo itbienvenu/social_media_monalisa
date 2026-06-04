@@ -108,6 +108,21 @@ async def get_post_metrics(post_id: str, user_info: dict = Depends(verify_token)
              raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
 
+@router.get("/posts/{post_id}/logs")
+async def get_post_logs(post_id: str, user_info: dict = Depends(verify_token)):
+    async with httpx.AsyncClient() as client:
+        try:
+             response = await client.get(
+                 f"{POST_ORCHESTRATOR_URL}/posts/{post_id}/logs"
+             )
+             response.raise_for_status()
+             return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
 # --- Connections Management ---
 
 @router.get("/connections")
@@ -219,17 +234,40 @@ async def upload_url_proxy(
             raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/uploads/{bucket}/{key:path}")
-async def get_upload_proxy(bucket: str, key: str):
-    async with httpx.AsyncClient() as client:
-        try:
-            minio_url = f"http://minio:9000/{bucket}/{key}"
-            resp = await client.get(minio_url)
-            resp.raise_for_status()
-            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+async def get_upload_proxy(
+    bucket: str, 
+    key: str,
+    user_info: dict = Depends(verify_token)
+):
+    token_user_id = user_info.get("user_id")
+    
+    # Enforce user ownership
+    key_parts = key.strip("/").split("/")
+    if len(key_parts) >= 2 and key_parts[0] == "uploads":
+        file_user_id = key_parts[1]
+        if file_user_id != token_user_id:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not own this resource")
+            
+    import boto3
+    from botocore.exceptions import ClientError
+    
+    try:
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=os.getenv("MINIO_ENDPOINT", "http://minio:9000"),
+            aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+            aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
+            config=boto3.session.Config(signature_version='s3v4')
+        )
+        response = s3_client.get_object(Bucket=bucket, Key=key)
+        content = response['Body'].read()
+        media_type = response.get('ContentType', 'application/octet-stream')
+        return Response(content=content, media_type=media_type)
+    except ClientError as e:
+        status_code = e.response.get('ResponseMetadata', {}).get('HTTPStatusCode', 500)
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 

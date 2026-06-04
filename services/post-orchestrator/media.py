@@ -54,26 +54,6 @@ def generate_upload_url(filename: str, user_id: str, content_type: str = "image/
         except Exception as e:
              logger.error(f"Failed to create bucket: {e}")
 
-    # Set public-read policy on the bucket to allow anonymous downloads (resolved 403 Forbidden)
-    try:
-        import json
-        policy = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Sid": "PublicRead",
-                    "Effect": "Allow",
-                    "Principal": "*",
-                    "Action": ["s3:GetObject"],
-                    "Resource": [f"arn:aws:s3:::{bucket}/*"]
-                }
-            ]
-        }
-        s3_client.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
-        logger.info(f"Successfully set public-read policy on MinIO bucket: {bucket}")
-    except Exception as e:
-        logger.error(f"Failed to set public-read policy on bucket {bucket}: {e}")
-
     try:
         # Create a client pointing to the public URL for presigned generation
         # so the signed Host header matches the browser's Host header.
@@ -124,8 +104,8 @@ def delete_media_files(media_keys: list):
     s3_client = boto3.client(
         "s3",
         endpoint_url=os.getenv("MINIO_ENDPOINT", "http://minio:9000"),
-        aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "test-value"),
-        aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "test-value"),
+        aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+        aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
         config=boto3.session.Config(signature_version='s3v4')
     )
     bucket = os.getenv("MINIO_BUCKET_NAME", "social-media-uploads")
@@ -145,9 +125,54 @@ def delete_media_files(media_keys: list):
                 match = re.search(r'uploads/.*', str(key))
                 if match:
                     obj_key = match.group(0)
+                else:
+                    # Skip external CDN URL
+                    continue
+        
+        if isinstance(obj_key, str):
+            obj_key = obj_key.split("?")[0]
         
         try:
             s3_client.delete_object(Bucket=bucket, Key=obj_key)
             logger.info(f"Successfully deleted local media file from MinIO: {obj_key}")
         except Exception as e:
             logger.error(f"Failed to delete media file {obj_key} from MinIO: {e}")
+
+
+def get_presigned_download_url(url: str, expires_in: int = 3600) -> str:
+    """
+    If the URL points to our MinIO instance via the API Gateway/uploads route,
+    converts it to a presigned GET URL pointing to MINIO_PUBLIC_URL.
+    Otherwise, returns the URL unchanged.
+    """
+    if not url:
+        return url
+    
+    # Check if the URL has our /uploads/ format
+    if "/uploads/" in url:
+        try:
+            parts = url.split("/uploads/", 1)[1].split("/", 1)
+            if len(parts) == 2:
+                bucket_name, obj_key = parts
+                
+                s3_client = boto3.client(
+                    "s3",
+                    endpoint_url=os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000"),
+                    aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+                    aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
+                    config=boto3.session.Config(signature_version='s3v4')
+                )
+                
+                presigned_url = s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={
+                        'Bucket': bucket_name,
+                        'Key': obj_key
+                    },
+                    ExpiresIn=expires_in
+                )
+                return presigned_url
+        except Exception as e:
+            logger.error(f"Failed to generate presigned GET URL for {url}: {e}")
+            
+    return url

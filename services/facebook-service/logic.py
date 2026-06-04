@@ -74,11 +74,10 @@ class FacebookClient:
         image_bytes = None
         content_type = "image/jpeg"
         try:
-            async with httpx.AsyncClient(timeout=15.0) as dl_client:
-                dl_resp = await dl_client.get(download_url)
-                dl_resp.raise_for_status()
-                image_bytes = dl_resp.content
-                content_type = dl_resp.headers.get("content-type", "image/jpeg")
+            dl_resp = await self.client.get(download_url, timeout=15.0)
+            dl_resp.raise_for_status()
+            image_bytes = dl_resp.content
+            content_type = dl_resp.headers.get("content-type", "image/jpeg")
             if post_id:
                 await log_post_stage(
                     database, post_id, "facebook", "media_downloaded", "INFO",
@@ -181,11 +180,10 @@ class FacebookClient:
                 )
                 
             try:
-                async with httpx.AsyncClient(timeout=15.0) as dl_client:
-                    dl_resp = await dl_client.get(download_url)
-                    dl_resp.raise_for_status()
-                    image_bytes = dl_resp.content
-                    content_type = dl_resp.headers.get("content-type", "image/jpeg")
+                dl_resp = await self.client.get(download_url, timeout=15.0)
+                dl_resp.raise_for_status()
+                image_bytes = dl_resp.content
+                content_type = dl_resp.headers.get("content-type", "image/jpeg")
                 if post_id:
                     await log_post_stage(
                         database, post_id, "facebook", f"media_downloaded_part_{idx+1}", "INFO",
@@ -368,10 +366,10 @@ class FacebookClient:
                     "metric": "post_impressions_unique"
                 }
                 insights_resp = await self.client.get(insights_url, params=insights_params)
-                if insights_resp.status_code == 200:
-                    insights_data = insights_resp.json().get("data", [])
-                    if insights_data:
-                        impressions = insights_data[0].get("values", [{}])[0].get("value", 0)
+                insights_resp.raise_for_status()
+                insights_data = insights_resp.json().get("data", [])
+                if insights_data:
+                    impressions = insights_data[0].get("values", [{}])[0].get("value", 0)
             except Exception as ins_err:
                 logger.warning(f"Failed to fetch post insights/impressions: {ins_err}")
                 # Estimate views based on engagement to avoid showing 0
