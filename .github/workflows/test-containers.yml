@@ -180,3 +180,62 @@ jobs:
         if: always()
         run: |
           docker compose down --volumes --remove-orphans
+
+  deploy:
+    name: Deploy to EC2
+    needs: test-containers
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH/rsync
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          SSH_HOST: ${{ secrets.EC2_HOST }}
+          SSH_USER: ${{ secrets.EC2_USER }}
+        run: |
+          # Create SSH directory and add the private key
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+          # Ensure the deployment directory exists on the EC2 machine
+          ssh -i ~/.ssh/id_rsa $SSH_USER@$SSH_HOST "mkdir -p /home/ubuntu/app/scripts"
+
+          # Copy the setup script to the EC2 machine and run it
+          scp -i ~/.ssh/id_rsa scripts/setup-ec2.sh $SSH_USER@$SSH_HOST:/home/ubuntu/app/scripts/setup-ec2.sh
+          ssh -i ~/.ssh/id_rsa $SSH_USER@$SSH_HOST "bash /home/ubuntu/app/scripts/setup-ec2.sh"
+
+          # Synchronize all code files to the EC2 machine (excluding venv, node_modules, .git, and .env)
+          # The --delete flag ensures deleted files are cleaned up, but --exclude prevents deleting/overwriting .env
+          rsync -avz --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude 'venv/' \
+            --exclude 'node_modules/' \
+            --exclude '.env' \
+            -e "ssh -i ~/.ssh/id_rsa" \
+            ./ $SSH_USER@$SSH_HOST:/home/ubuntu/app/
+
+          # Start services and verify deployment on EC2
+          ssh -i ~/.ssh/id_rsa $SSH_USER@$SSH_HOST "
+            cd /home/ubuntu/app
+            
+            # Initialize .env with example if it does not exist
+            if [ ! -f .env ]; then
+              echo '⚠️ .env file not found. Initializing with .env.example...'
+              cp .env.example .env
+            fi
+            
+            # Build and launch the containers
+            docker compose down --remove-orphans
+            docker compose up -d --build
+            
+            # Execute verification script
+            bash scripts/verify-deployment.sh
+          "
+
