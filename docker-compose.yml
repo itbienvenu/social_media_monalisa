@@ -52,6 +52,7 @@ services:
     ports:
       - "8002:8000"
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -73,6 +74,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-social_platform}
       - SECRET_KEY=${SECRET_KEY}
       - MINIO_ENDPOINT=http://minio:9000
@@ -91,6 +93,7 @@ services:
       context: .
       dockerfile: services/post-orchestrator/Dockerfile
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -116,6 +119,7 @@ services:
       context: .
       dockerfile: services/facebook-service/Dockerfile
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -141,6 +145,7 @@ services:
       dockerfile: services/tiktok-service/Dockerfile
     env_file: .env
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -181,6 +186,7 @@ services:
       context: .
       dockerfile: services/linkedin-service/Dockerfile
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - MOCK_MODE=${MOCK_MODE:-false}
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
@@ -199,6 +205,7 @@ services:
       context: .
       dockerfile: services/analytics-collector/Dockerfile
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -216,6 +223,7 @@ services:
     ports:
       - "8001:8000"
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -231,6 +239,7 @@ services:
       context: .
       dockerfile: services/instagram-service/Dockerfile
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - MOCK_MODE=false
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
