@@ -12,9 +12,11 @@ async def collect_analytics():
     # Mocking this process.
     logger.info("Analytics collection complete.")
 
+from libs.common.db import connect_db_with_retry
+
 async def main():
     logger.info("Starting Analytics Collector...")
-    await database.connect()
+    await connect_db_with_retry(database)
     try:
         while True:
             await collect_analytics()

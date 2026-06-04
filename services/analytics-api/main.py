@@ -2,9 +2,11 @@ from fastapi import FastAPI
 from services.analytics_api.db import database
 from contextlib import asynccontextmanager
 
+from libs.common.db import connect_db_with_retry
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await database.connect()
+    await connect_db_with_retry(database)
     yield
     await database.disconnect()
 
