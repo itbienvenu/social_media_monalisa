@@ -135,9 +135,14 @@ async def handle_post_failed(data: dict, platform: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await connect_db_with_retry(database)
+    
     # Create tables (for simplicity in this monorepo setup)
     engine = sqlalchemy.create_engine(str(database.url))
-    metadata.create_all(engine)
+    try:
+        metadata.create_all(engine)
+    except Exception as e:
+        logger.warning(f"Table creation skipped or already completed: {e}")
     
     # Run dynamic schema migrations for pre-existing tables
     with engine.begin() as conn:
@@ -175,8 +180,6 @@ async def lifespan(app: FastAPI):
                         logger.warning(f"Could not add unique constraint to posts table: {ce}")
         except Exception as me:
             logger.error(f"Failed to check/migrate posts table schema: {me}")
-            
-    await connect_db_with_retry(database)
     
     # Start RabbitMQ subscriptions
     try:

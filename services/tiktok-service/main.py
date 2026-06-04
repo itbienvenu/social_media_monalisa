@@ -28,14 +28,17 @@ from libs.common.db import connect_db_with_retry
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Init DB
+    await connect_db_with_retry(database)
+    
     logger.info(f"DEBUG: DATABASE_URL={database.url}")
     
     # Use sync driver for create_all
     sync_db_url = str(database.url).replace("+asyncpg", "")
     engine = sqlalchemy.create_engine(sync_db_url)
-    metadata.create_all(engine)
-    
-    await connect_db_with_retry(database)
+    try:
+        metadata.create_all(engine)
+    except Exception as e:
+        logger.warning(f"Table creation skipped or already completed: {e}")
     
     # Init Redis
     global redis_client
