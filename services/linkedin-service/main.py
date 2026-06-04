@@ -17,13 +17,15 @@ logger = logging.getLogger("linkedin-service")
 
 mq = MessageQueue("linkedin-service")
 
+from libs.common.db import connect_db_with_retry
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"DEBUG: DATABASE_URL={database.url}")
     engine = sqlalchemy.create_engine(str(database.url))
     metadata.create_all(engine)
     
-    await database.connect()
+    await connect_db_with_retry(database)
     
     consume_task = asyncio.create_task(consume_loop())
     

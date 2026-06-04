@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import json
 import logging
+from libs.common.db import connect_db_with_retry
 from libs.common.logger import log_post_stage
 
 logging.basicConfig(level=logging.INFO)
@@ -175,7 +176,7 @@ async def lifespan(app: FastAPI):
         except Exception as me:
             logger.error(f"Failed to check/migrate posts table schema: {me}")
             
-    await database.connect()
+    await connect_db_with_retry(database)
     
     # Start RabbitMQ subscriptions
     try:

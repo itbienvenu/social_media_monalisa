@@ -16,6 +16,8 @@ logger = logging.getLogger("facebook-service")
 
 mq = MessageQueue("facebook-service")
 
+from libs.common.db import connect_db_with_retry
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Init DB
@@ -23,7 +25,7 @@ async def lifespan(app: FastAPI):
     engine = sqlalchemy.create_engine(str(database.url))
     metadata.create_all(engine)
     
-    await database.connect()
+    await connect_db_with_retry(database)
     
     # Start Consumer Background Task
     consume_task = asyncio.create_task(consume_loop())

@@ -23,6 +23,8 @@ logger = logging.getLogger("tiktok-service")
 mq = MessageQueue("tiktok-service")
 redis_client = None
 
+from libs.common.db import connect_db_with_retry
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Init DB
@@ -33,7 +35,7 @@ async def lifespan(app: FastAPI):
     engine = sqlalchemy.create_engine(sync_db_url)
     metadata.create_all(engine)
     
-    await database.connect()
+    await connect_db_with_retry(database)
     
     # Init Redis
     global redis_client
