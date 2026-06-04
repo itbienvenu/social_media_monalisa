@@ -21,11 +21,14 @@ from libs.common.db import connect_db_with_retry
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Init DB
+    await connect_db_with_retry(database)
+    
     print(f"DEBUG: DATABASE_URL={database.url}", flush=True)
     engine = sqlalchemy.create_engine(str(database.url))
-    metadata.create_all(engine)
-    
-    await connect_db_with_retry(database)
+    try:
+        metadata.create_all(engine)
+    except Exception as e:
+        print(f"Table creation skipped or already completed: {e}", flush=True)
     
     # Start Consumer Background Task
     consume_task = asyncio.create_task(consume_loop())

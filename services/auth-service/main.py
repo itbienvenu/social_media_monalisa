@@ -20,10 +20,13 @@ from libs.common.db import connect_db_with_retry
 async def lifespan(app: FastAPI):
     logger.info("Starting Auth Service...")
     # Init DB
-    engine = sqlalchemy.create_engine(str(database.url))
-    metadata.create_all(engine)
-    
     await connect_db_with_retry(database)
+    
+    engine = sqlalchemy.create_engine(str(database.url))
+    try:
+        metadata.create_all(engine)
+    except Exception as e:
+        logger.warning(f"Table creation skipped or already completed: {e}")
     yield
     await database.disconnect()
 
