@@ -34,7 +34,7 @@ allowed_origins = list(set(allowed_origins))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|.*\.amazonaws\.com|.*\.ngrok-free\.dev)(:\d+)?",
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|.*\.amazonaws\.com|.*\.ngrok-free\.dev|.*\.itims\.online|itims\.online)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
