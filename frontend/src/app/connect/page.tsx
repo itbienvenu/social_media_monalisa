@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { apiFetch } from '../../utils/api';
 
 export default function ConnectPage() {
     const [loading, setLoading] = useState(false);
@@ -9,7 +10,7 @@ export default function ConnectPage() {
     const handleConnect = async (platform: string) => {
         setLoading(true);
         try {
-            const res = await fetch(`${API_URL}/auth/${platform}/connect?user_id=${USER_ID}`, {
+            const res = await apiFetch(`${API_URL}/auth/${platform}/connect`, {
                 method: 'POST'
             });
             const data = await res.json();

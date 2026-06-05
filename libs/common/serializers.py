@@ -22,6 +22,8 @@ class PostBase(BaseModel):
     media_key: Optional[str] = None
     media_keys: Optional[List[str]] = None
     platforms: List[Platform]
+    is_reel: Optional[bool] = False
+    facebook_page_id: Optional[str] = None
 
     @field_validator("media_keys")
     @classmethod
@@ -51,6 +53,7 @@ class PlatformPostEvent(BaseModel):
     media_url: Optional[str] = None
     media_urls: Optional[List[str]] = None
     user_id: str
+    is_reel: Optional[bool] = False
     
 class AnalyticsSnapshot(BaseModel):
     post_id: uuid.UUID

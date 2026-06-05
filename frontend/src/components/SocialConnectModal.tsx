@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from 'react';
+import { apiFetch } from '../utils/api';
 
 // User might not have heroicons, check package later. For now I'll use text X or assume standard Setup.
 // Actually, safest to use standard SVGs if I don't know the deps.
@@ -31,12 +32,8 @@ export default function SocialConnectModal({ isOpen, onClose }: SocialConnectMod
         }
 
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/${platform}/connect`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/${platform}/connect`, {
+                method: 'POST'
             });
 
             if (!res.ok) {

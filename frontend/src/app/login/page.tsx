@@ -17,15 +17,19 @@ export default function LoginPage() {
         try {
             const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'ngrok-skip-browser-warning': 'true'
+                },
                 body: JSON.stringify({ email, password }),
             });
 
             const data = await res.json();
 
             if (res.ok) {
-                // Store token (in localStorage for MVP)
+                // Store token
                 localStorage.setItem('token', data.access_token);
+                localStorage.setItem('refreshToken', data.refresh_token);
                 router.push('/dashboard');
             } else {
                 setError(data.detail || 'Login failed');

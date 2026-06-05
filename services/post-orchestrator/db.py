@@ -30,6 +30,7 @@ Post = Table(
     Column("content", String),
     Column("media_key", String, nullable=True),
     Column("media_keys", String, nullable=True),
+    Column("is_reel", sqlalchemy.Boolean, default=False, server_default="false"),
     Column("status", String, default=PostStatus.PENDING.value),
     Column("user_id", String, index=True, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
