@@ -20,15 +20,23 @@ docker compose ps
 #     stream of newline-delimited JSON objects (older versions).
 UNHEALTHY_SERVICES=$(docker compose ps --format json \
   | jq -r '[.[]] | .[] | select(.State != "running") | .Service' || true)
+RUNNING_COUNT=$(docker compose ps --format json \
+  | jq -r '[.[]] | .[] | select(.State == "running") | .Service' | wc -l || echo 0)
+
+if [ "$RUNNING_COUNT" -eq 0 ]; then
+  echo "❌ No containers are running at all. Build likely failed or containers crashed on startup."
+  docker compose logs --tail=200
+  exit 1
+fi
 if [ -n "$UNHEALTHY_SERVICES" ]; then
   echo "❌ One or more Docker services are not running: $UNHEALTHY_SERVICES"
   docker compose logs --tail=200
   exit 1
 fi
-echo "✓ All containers are running."
+echo "✓ All $RUNNING_COUNT containers are running."
 
 echo "=== Checking Auth Service /health endpoint ==="
-curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8002/health || (
+curl --fail --retry 10 --retry-delay 5 --retry-connrefused --retry-all-errors http://localhost:8002/health || (
   echo "❌ Auth service health check failed at http://localhost:8002/health"
   docker compose logs auth-service --tail=200
   exit 1
@@ -36,7 +44,7 @@ curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8002
 echo "✓ Auth service is healthy."
 
 echo "=== Checking API Gateway /docs endpoint ==="
-curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8000/docs || (
+curl --fail --retry 10 --retry-delay 5 --retry-connrefused --retry-all-errors http://localhost:8000/docs || (
   echo "❌ API Gateway health check failed"
   docker compose logs api-gateway --tail=200
   exit 1
@@ -44,7 +52,7 @@ curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8000
 echo "✓ API Gateway is healthy."
 
 echo "=== Checking Analytics API /docs endpoint ==="
-curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8001/docs || (
+curl --fail --retry 10 --retry-delay 5 --retry-connrefused --retry-all-errors http://localhost:8001/docs || (
   echo "❌ Analytics API health check failed"
   docker compose logs analytics-api --tail=200
   exit 1
@@ -79,7 +87,7 @@ docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping || (
 echo "✓ RabbitMQ connectivity check passed."
 
 echo "=== Checking MinIO Connectivity ==="
-curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:9000/minio/health/live || (
+curl --fail --retry 10 --retry-delay 5 --retry-connrefused --retry-all-errors http://localhost:9000/minio/health/live || (
   echo "❌ MinIO connectivity check failed"
   docker compose logs minio --tail=200
   exit 1
