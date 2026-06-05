@@ -61,15 +61,13 @@ async def facebook_callback(code: str, state: str):
     if FACEBOOK_APP_ID and FACEBOOK_APP_SECRET:
         api_version = os.getenv("FACEBOOK_API_VERSION", "v18.0")
         token_url = f"https://graph.facebook.com/{api_version}/oauth/access_token"
+        base_url = os.getenv("BASE_URL", "http://localhost:8000")
         params = {
             "client_id": FACEBOOK_APP_ID,
-            "redirect_uri": f"{Request.base_url}auth/callback", # Ensure this matches handling
+            "redirect_uri": f"{base_url}/auth/facebook/callback",
             "client_secret": FACEBOOK_APP_SECRET,
             "code": code
         }
-        # Custom BASE_URL logic
-        base_url = os.getenv("BASE_URL", "http://localhost:8000")
-        params["redirect_uri"] = f"{base_url}/auth/facebook/callback"
 
         async with httpx.AsyncClient() as client:
             try:

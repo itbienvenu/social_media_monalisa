@@ -196,19 +196,32 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
           SSH_HOST: ${{ secrets.EC2_HOST }}
           SSH_USER: ${{ secrets.EC2_USER }}
+          # EC2_KNOWN_HOSTS must contain the pre-verified host key line for $SSH_HOST.
+          # Obtain it once from a trusted network: ssh-keyscan -H <EC2_HOST>
+          # then store the output as the EC2_KNOWN_HOSTS GitHub Secret.
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
         run: |
           # Create SSH directory and add the private key
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+          # Write the pinned host key — never trust whatever key the server advertises at deploy time
+          echo "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          # Shared SSH options: strict host checking enforced, no interactive prompts
+          SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts"
+
+          # Derive the remote app directory from the actual SSH user — avoids hardcoding /home/ubuntu
+          REMOTE_APP_DIR="/home/$SSH_USER/app"
 
           # Ensure the deployment directory exists on the EC2 machine
-          ssh -i ~/.ssh/id_rsa $SSH_USER@$SSH_HOST "mkdir -p /home/ubuntu/app/scripts"
+          ssh $SSH_OPTS $SSH_USER@$SSH_HOST "mkdir -p $REMOTE_APP_DIR/scripts"
 
           # Copy the setup script to the EC2 machine and run it
-          scp -i ~/.ssh/id_rsa scripts/setup-ec2.sh $SSH_USER@$SSH_HOST:/home/ubuntu/app/scripts/setup-ec2.sh
-          ssh -i ~/.ssh/id_rsa $SSH_USER@$SSH_HOST "bash /home/ubuntu/app/scripts/setup-ec2.sh"
+          scp $SSH_OPTS scripts/setup-ec2.sh $SSH_USER@$SSH_HOST:$REMOTE_APP_DIR/scripts/setup-ec2.sh
+          ssh $SSH_OPTS $SSH_USER@$SSH_HOST "bash $REMOTE_APP_DIR/scripts/setup-ec2.sh"
 
           # Synchronize all code files to the EC2 machine (excluding venv, node_modules, .git, and .env)
           # The --delete flag ensures deleted files are cleaned up, but --exclude prevents deleting/overwriting .env
@@ -218,17 +231,19 @@ jobs:
             --exclude 'venv/' \
             --exclude 'node_modules/' \
             --exclude '.env' \
-            -e "ssh -i ~/.ssh/id_rsa" \
-            ./ $SSH_USER@$SSH_HOST:/home/ubuntu/app/
+            -e "ssh $SSH_OPTS" \
+            ./ $SSH_USER@$SSH_HOST:$REMOTE_APP_DIR/
 
           # Start services and verify deployment on EC2
-          ssh -i ~/.ssh/id_rsa $SSH_USER@$SSH_HOST "
-            cd /home/ubuntu/app
+          ssh $SSH_OPTS $SSH_USER@$SSH_HOST "
+            cd $REMOTE_APP_DIR
             
-            # Initialize .env with example if it does not exist
+            # Fail fast if .env is missing — never fall back to .env.example in production.
+            # Provision .env on the EC2 host before deploying (e.g. from GitHub Secrets or AWS SSM).
             if [ ! -f .env ]; then
-              echo '⚠️ .env file not found. Initializing with .env.example...'
-              cp .env.example .env
+              echo '❌ ERROR: .env file is missing on the EC2 host.'
+              echo '   Deploy aborted. Provision .env from a secure source (GitHub Secrets, AWS SSM, etc.) before deploying.'
+              exit 1
             fi
             
             # Build and launch the containers

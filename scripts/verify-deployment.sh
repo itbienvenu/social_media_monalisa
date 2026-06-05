@@ -1,14 +1,27 @@
 #!/bin/bash
-# Exit on error
-set -e
+# Exit on error, and treat pipeline failures as errors
+set -eo pipefail
+
+# Load .env so POSTGRES_USER / POSTGRES_DB are available
+set -a
+[ -f .env ] && source .env
+set +a
 
 echo "=== Verifying Docker Container Status ==="
 docker compose ps
 
-# Inspect for crashed or exited containers
-CRASHED_SERVICES=$(docker compose ps --format json | jq -r 'select(.State == "exited" or .State == "dead") | .Service' || true)
-if [ ! -z "$CRASHED_SERVICES" ]; then
-  echo "❌ One or more Docker services crashed or exited: $CRASHED_SERVICES"
+# Inspect for unhealthy containers.
+# Two fixes applied here:
+#  1. State check: catches ALL non-running states (restarting, exited, dead,
+#     created, paused, etc.) — the old filter missed crash-looping containers
+#     whose state is 'restarting'.
+#  2. jq filter: wraps input with [.[]] so it handles both output formats of
+#     'docker compose ps --format json': a JSON array (Compose v2.20+) and a
+#     stream of newline-delimited JSON objects (older versions).
+UNHEALTHY_SERVICES=$(docker compose ps --format json \
+  | jq -r '[.[]] | .[] | select(.State != "running") | .Service' || true)
+if [ -n "$UNHEALTHY_SERVICES" ]; then
+  echo "❌ One or more Docker services are not running: $UNHEALTHY_SERVICES"
   docker compose logs --tail=200
   exit 1
 fi
@@ -39,7 +52,10 @@ curl --fail --retry 10 --retry-delay 5 --retry-connrefused http://localhost:8001
 echo "✓ Analytics API is healthy."
 
 echo "=== Checking PostgreSQL Connectivity ==="
-docker compose exec -T db pg_isready -U user -d social_platform || (
+# Run pg_isready inside the container's own shell so it automatically uses
+# the POSTGRES_USER and POSTGRES_DB env vars that docker-compose injected —
+# no hardcoded values, no dependency on the host environment.
+docker compose exec -T db sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' || (
   echo "❌ PostgreSQL connectivity check failed."
   docker compose logs db --tail=200
   exit 1
