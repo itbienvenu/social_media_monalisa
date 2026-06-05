@@ -1,5 +1,5 @@
 'use client';
-import { useState, ChangeEvent } from 'react';
+import { useState, ChangeEvent, useEffect } from 'react';
 
 export default function PostPage() {
     const [content, setContent] = useState('');
@@ -9,13 +9,49 @@ export default function PostPage() {
     const [mediaUrl, setMediaUrl] = useState('');
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     const [uploadProgress, setUploadProgress] = useState(0);
+    const [isReel, setIsReel] = useState(false);
+
+    // Facebook Pages target selection
+    const [facebookPages, setFacebookPages] = useState<{ target_id: string; target_name: string }[]>([]);
+    const [selectedFacebookPage, setSelectedFacebookPage] = useState<string>('');
+    const [loadingPages, setLoadingPages] = useState<boolean>(false);
 
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
+    const fetchFacebookPages = async () => {
+        const token = localStorage.getItem('token');
+        if (!token) return;
+        setLoadingPages(true);
+        try {
+            const res = await fetch(`${API_URL}/facebook/targets`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'ngrok-skip-browser-warning': 'true'
+                }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                const pagesOnly = data.filter((t: any) => t.target_type === 'page');
+                setFacebookPages(pagesOnly);
+                if (pagesOnly.length > 0) {
+                    setSelectedFacebookPage(pagesOnly[0].target_id);
+                }
+            }
+        } catch (err) {
+            console.error("Failed to fetch Facebook pages:", err);
+        } finally {
+            setLoadingPages(false);
+        }
+    };
+
     const togglePlatform = (p: string) => {
-        setPlatforms(prev =>
-            prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]
-        );
+        setPlatforms(prev => {
+            const next = prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p];
+            if (p === 'facebook' && next.includes('facebook') && facebookPages.length === 0) {
+                fetchFacebookPages();
+            }
+            return next;
+        });
     };
 
     const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -33,7 +69,10 @@ export default function PostPage() {
         const filename = `${Date.now()}-${file.name}`;
         const res = await fetch(`${API_URL}/media/upload-url?filename=${filename}&content_type=${file.type}`, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}` }
+            headers: { 
+                'Authorization': `Bearer ${token}`,
+                'ngrok-skip-browser-warning': 'true'
+            }
         });
 
         if (!res.ok) throw new Error("Failed to get upload URL");
@@ -98,13 +137,16 @@ export default function PostPage() {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
+                    'Authorization': `Bearer ${token}`,
+                    'ngrok-skip-browser-warning': 'true'
                 },
                 body: JSON.stringify({
                     content: content,
                     media_key: finalMediaUrls[0] || mediaUrl || undefined,
                     media_keys: finalMediaUrls.length > 0 ? finalMediaUrls : (mediaUrl ? [mediaUrl] : undefined),
-                    platforms: platforms
+                    platforms: platforms,
+                    is_reel: isReel,
+                    facebook_page_id: platforms.includes('facebook') && selectedFacebookPage ? selectedFacebookPage : undefined
                 })
             });
 
@@ -192,6 +234,25 @@ export default function PostPage() {
                             />
                         </div>
 
+                        {/* Reel Toggle */}
+                        <div className="flex items-center space-x-3 bg-blue-50 p-4 rounded-lg border border-blue-200">
+                            <input
+                                type="checkbox"
+                                id="isReel"
+                                checked={isReel}
+                                onChange={e => setIsReel(e.target.checked)}
+                                className="h-5 w-5 text-blue-600 focus:ring-blue-500 border-gray-300 rounded cursor-pointer"
+                            />
+                            <div className="select-none cursor-pointer">
+                                <label htmlFor="isReel" className="block text-sm font-semibold text-blue-900 cursor-pointer">
+                                    Publish Video as Reel / Short
+                                </label>
+                                <span className="block text-xs text-blue-700">
+                                    If enabled, video uploads will be published as Reels (Facebook) instead of standard feed posts.
+                                </span>
+                            </div>
+                        </div>
+
                         {/* Platforms */}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-2">Select Platforms</label>
@@ -211,6 +272,34 @@ export default function PostPage() {
                                 ))}
                             </div>
                         </div>
+
+                        {/* Facebook Page Selection */}
+                        {platforms.includes('facebook') && (
+                            <div className="bg-blue-50/50 border border-blue-100 rounded-lg p-4 space-y-2">
+                                <label className="block text-sm font-semibold text-blue-900">
+                                    Publishing Target for Facebook
+                                </label>
+                                {loadingPages ? (
+                                    <p className="text-sm text-gray-500 animate-pulse">Loading pages...</p>
+                                ) : facebookPages.length > 0 ? (
+                                    <select
+                                        value={selectedFacebookPage}
+                                        onChange={e => setSelectedFacebookPage(e.target.value)}
+                                        className="w-full p-2.5 bg-white border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    >
+                                        {facebookPages.map(page => (
+                                            <option key={page.target_id} value={page.target_id}>
+                                                {page.target_name} ({page.target_id})
+                                            </option>
+                                        ))}
+                                    </select>
+                                ) : (
+                                    <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 p-3 rounded">
+                                        No connected Facebook Pages found. Make sure you connected your account with proper permissions, or try reconnecting under "Connect Accounts".
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* Submit */}
                         <button

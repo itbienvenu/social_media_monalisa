@@ -24,3 +24,6 @@ class FacebookMetricsResponse(BaseModel):
     comments: int
     shares: int
     views: int
+    video_status: Optional[str] = None
+    video_progress: Optional[int] = None
+    permalink: Optional[str] = None

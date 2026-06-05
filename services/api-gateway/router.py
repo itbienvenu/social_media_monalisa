@@ -186,6 +186,19 @@ async def delete_connection(platform: str, user_info: dict = Depends(verify_toke
         except httpx.HTTPError as e:
              raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/facebook/targets")
+async def get_facebook_targets(
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{FACEBOOK_SERVICE_URL}/targets", params={"user_id": user_id})
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
 # --- Auth Proxy ---
 
 @router.post("/auth/register")
@@ -330,3 +343,45 @@ async def platform_callback(platform: str, code: str, state: str):
              return response.json()
         except httpx.RequestError as exc:
              raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+
+from pydantic import BaseModel
+
+class PostUpdatePayload(BaseModel):
+    content: str
+
+@router.delete("/posts/{post_id}")
+async def delete_post(post_id: str, user_info: dict = Depends(verify_token)):
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            # 1. Fetch post to verify ownership/access
+            get_resp = await client.get(f"{POST_ORCHESTRATOR_URL}/posts/{post_id}")
+            get_resp.raise_for_status()
+            
+            # 2. Forward delete to post-orchestrator
+            response = await client.delete(f"{POST_ORCHESTRATOR_URL}/posts/{post_id}")
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+@router.put("/posts/{post_id}")
+async def update_post(post_id: str, payload: PostUpdatePayload, user_info: dict = Depends(verify_token)):
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            # 1. Fetch post to verify ownership/access
+            get_resp = await client.get(f"{POST_ORCHESTRATOR_URL}/posts/{post_id}")
+            get_resp.raise_for_status()
+            
+            # 2. Forward put to post-orchestrator
+            response = await client.put(
+                f"{POST_ORCHESTRATOR_URL}/posts/{post_id}", 
+                json=payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)

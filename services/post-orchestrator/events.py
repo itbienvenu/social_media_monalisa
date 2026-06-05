@@ -9,7 +9,7 @@ import os
 S3_ENDPOINT = os.getenv("MINIO_ENDPOINT_URL", "http://minio:9000")
 S3_BUCKET = os.getenv("S3_BUCKET_NAME", "social-media-content")
 
-async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: str, media_key: str = None, user_id: str = "anonymous", media_keys: list = None):
+async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: str, media_key: str = None, user_id: str = "anonymous", media_keys: list = None, is_reel: bool = False, facebook_page_id: str = None):
     # Construct media_url if key exists
     # Note: In production, this should be a presigned GET URL or a CDN URL.
     # For now, we use the direct MinIO/S3 URL accessible by the implementation services.
@@ -82,6 +82,8 @@ async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: st
         "media_keys": media_keys,
         "media_url": media_url,
         "media_urls": media_urls,
-        "user_id": user_id
+        "user_id": user_id,
+        "is_reel": is_reel,
+        "facebook_page_id": facebook_page_id
     }
     await mq.publish(f"posts.{platform_str}", event)

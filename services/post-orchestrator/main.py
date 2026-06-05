@@ -159,6 +159,9 @@ async def lifespan(app: FastAPI):
                 if "media_keys" not in columns:
                     conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN media_keys VARCHAR"))
                     logger.info("Migrated schema: Added column media_keys to posts table")
+                if "is_reel" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN is_reel BOOLEAN DEFAULT FALSE"))
+                    logger.info("Migrated schema: Added column is_reel to posts table")
                 
                 # Check and add unique constraint
                 # uq_user_platform_external_post unique constraint
@@ -181,30 +184,39 @@ async def lifespan(app: FastAPI):
         except Exception as me:
             logger.error(f"Failed to check/migrate posts table schema: {me}")
     
-    # Start RabbitMQ subscriptions
-    try:
-        await mq.connect()
-        
-        def make_success_handler(platform_name: str):
-            async def handler(data: dict):
-                p_name = data.get("platform", platform_name)
-                await handle_post_success(data, p_name)
-            return handler
+    # Start RabbitMQ subscriptions in background task with retry
+    async def setup_subscriptions_loop():
+        logger.info("Starting RabbitMQ subscription setup loop in post-orchestrator...")
+        while True:
+            try:
+                await mq.connect()
+                
+                def make_success_handler(platform_name: str):
+                    async def handler(data: dict):
+                        p_name = data.get("platform", platform_name)
+                        await handle_post_success(data, p_name)
+                    return handler
 
-        def make_failed_handler(platform_name: str):
-            async def handler(data: dict):
-                p_name = data.get("platform", platform_name)
-                await handle_post_failed(data, p_name)
-            return handler
+                def make_failed_handler(platform_name: str):
+                    async def handler(data: dict):
+                        p_name = data.get("platform", platform_name)
+                        await handle_post_failed(data, p_name)
+                    return handler
 
-        for platform in ["facebook", "tiktok", "linkedin", "instagram"]:
-            await mq.subscribe(f"posts.{platform}.success", make_success_handler(platform))
-            await mq.subscribe(f"posts.{platform}.failed", make_failed_handler(platform))
-        logger.info("Successfully subscribed to posts success and failure events")
-    except Exception as e:
-        logger.error(f"Failed to setup RabbitMQ subscriptions in post-orchestrator: {e}")
+                for platform in ["facebook", "tiktok", "linkedin", "instagram"]:
+                    await mq.subscribe(f"posts.{platform}.success", make_success_handler(platform))
+                    await mq.subscribe(f"posts.{platform}.failed", make_failed_handler(platform))
+                logger.info("Successfully subscribed to posts success and failure events in post-orchestrator")
+                break
+            except Exception as e:
+                logger.error(f"Failed to setup RabbitMQ subscriptions in post-orchestrator: {e}. Retrying in 5s...")
+                await asyncio.sleep(5)
+
+    consume_task = asyncio.create_task(setup_subscriptions_loop())
         
     yield
+    
+    consume_task.cancel()
     try:
         await mq.disconnect()
     except Exception:
@@ -230,6 +242,7 @@ async def create_post(post_data: PostCreate, user_id: str):
         content=post_data.content,
         media_key=media_key,
         media_keys=json.dumps(media_keys) if media_keys else None,
+        is_reel=post_data.is_reel,
         status=PostStatus.PENDING.value,
         user_id=user_id,
         created_at=datetime.utcnow(),
@@ -264,7 +277,9 @@ async def create_post(post_data: PostCreate, user_id: str):
                 content=post_data.content, 
                 media_key=post_data.media_key, 
                 user_id=user_id,
-                media_keys=post_data.media_keys
+                media_keys=post_data.media_keys,
+                is_reel=post_data.is_reel,
+                facebook_page_id=post_data.facebook_page_id
             )
             # Only emit event_published lifecycle stage after confirmed publish success
             await log_post_stage(
@@ -295,9 +310,170 @@ async def create_post(post_data: PostCreate, user_id: str):
         media_key=get_presigned_download_url(post['media_key']),
         media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
         platforms=post_data.platforms,
+        is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
         updated_at=post['updated_at']
+    )
+
+from pydantic import BaseModel
+
+class PostUpdate(BaseModel):
+    content: str
+
+@app.delete("/posts/{post_id}")
+async def delete_post(post_id: uuid.UUID):
+    import httpx
+    # 1. Fetch the post to make sure it exists and to get media keys for cleanup
+    post_query = Post.select().where(Post.c.id == post_id)
+    post = await database.fetch_one(post_query)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+        
+    user_id = post["user_id"]
+
+    # 2. Fetch all post targets
+    targets_query = PostTarget.select().where(PostTarget.c.post_id == post_id)
+    targets = await database.fetch_all(targets_query)
+    
+    # 3. Delete from the respective platform service for targets that were published
+    async with httpx.AsyncClient() as client:
+        for target in targets:
+            platform = target["platform"]
+            ext_id = target["external_id"]
+            if ext_id and target["status"] in ("published", "success", "completed", "synced"):
+                svc_url = f"http://{platform}-service:8000/posts/{ext_id}"
+                try:
+                    logger.info(f"Deleting post {ext_id} from platform {platform}")
+                    resp = await client.delete(svc_url, params={"user_id": user_id}, timeout=10.0)
+                    if resp.status_code != 200:
+                        logger.error(f"Platform service {platform} failed to delete post {ext_id}: {resp.text}")
+                except Exception as e:
+                    logger.error(f"Failed to connect to platform service {platform} to delete post {ext_id}: {e}")
+
+        # Also handle historically synced posts
+        if post["status"] == PostStatus.SYNCED.value and post["external_id"] and post["platform"]:
+            platform = post["platform"]
+            ext_id = post["external_id"]
+            svc_url = f"http://{platform}-service:8000/posts/{ext_id}"
+            try:
+                logger.info(f"Deleting synced post {ext_id} from platform {platform}")
+                resp = await client.delete(svc_url, params={"user_id": user_id}, timeout=10.0)
+                if resp.status_code != 200:
+                    logger.error(f"Platform service {platform} failed to delete synced post {ext_id}: {resp.text}")
+            except Exception as e:
+                logger.error(f"Failed to connect to platform service {platform} to delete synced post {ext_id}: {e}")
+
+    # 4. Clean up local MinIO/S3 media files if any
+    try:
+        media_keys_list = json.loads(post["media_keys"]) if post["media_keys"] else []
+        if post["media_key"] and post["media_key"] not in media_keys_list:
+            media_keys_list.append(post["media_key"])
+        if media_keys_list:
+            logger.info(f"Deleting local media files from MinIO: {media_keys_list}")
+            # Strip pre-signed parts or URL prefixes if they are stored as full URLs
+            clean_keys = []
+            for key in media_keys_list:
+                # If key is a full URL, extract the path after '/uploads/'
+                if "http" in key:
+                    parts = key.split("/uploads/")
+                    if len(parts) > 1:
+                        # Re-add prefix or keep it relative
+                        clean_keys.append("uploads/" + parts[1])
+                    else:
+                        clean_keys.append(key)
+                else:
+                    clean_keys.append(key)
+            # Run in executor
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, delete_media_files, clean_keys)
+    except Exception as media_err:
+        logger.error(f"Failed to clean up MinIO files for post {post_id}: {media_err}")
+
+    # 5. Delete from database (targets, logs, then post)
+    await database.execute(PostTarget.delete().where(PostTarget.c.post_id == post_id))
+    await database.execute(PostLog.delete().where(PostLog.c.post_id == post_id))
+    await database.execute(Post.delete().where(Post.c.id == post_id))
+
+    return {"status": "deleted"}
+
+@app.put("/posts/{post_id}", response_model=PostResponse)
+async def update_post_endpoint(post_id: uuid.UUID, update_data: PostUpdate):
+    import httpx
+    # 1. Fetch post
+    post_query = Post.select().where(Post.c.id == post_id)
+    post = await database.fetch_one(post_query)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+        
+    user_id = post["user_id"]
+
+    # 2. Fetch targets
+    targets_query = PostTarget.select().where(PostTarget.c.post_id == post_id)
+    targets = await database.fetch_all(targets_query)
+
+    # 3. Update the post message/caption on each platform
+    async with httpx.AsyncClient() as client:
+        for target in targets:
+            platform = target["platform"]
+            ext_id = target["external_id"]
+            if ext_id and target["status"] in ("published", "success", "completed", "synced"):
+                svc_url = f"http://{platform}-service:8000/posts/{ext_id}"
+                try:
+                    logger.info(f"Updating post {ext_id} message on platform {platform}")
+                    resp = await client.put(
+                        svc_url, 
+                        params={"user_id": user_id, "message": update_data.content}, 
+                        timeout=10.0
+                    )
+                    if resp.status_code != 200:
+                        logger.error(f"Platform service {platform} failed to update post {ext_id}: {resp.text}")
+                except Exception as e:
+                    logger.error(f"Failed to connect to platform service {platform} to update post {ext_id}: {e}")
+
+        # Historically synced post
+        if post["status"] == PostStatus.SYNCED.value and post["external_id"] and post["platform"]:
+            platform = post["platform"]
+            ext_id = post["external_id"]
+            svc_url = f"http://{platform}-service:8000/posts/{ext_id}"
+            try:
+                logger.info(f"Updating synced post {ext_id} message on platform {platform}")
+                resp = await client.put(
+                    svc_url, 
+                    params={"user_id": user_id, "message": update_data.content}, 
+                    timeout=10.0
+                )
+                if resp.status_code != 200:
+                    logger.error(f"Platform service {platform} failed to update synced post {ext_id}: {resp.text}")
+            except Exception as e:
+                logger.error(f"Failed to connect to platform service {platform} to update synced post {ext_id}: {e}")
+
+    # 4. Update local database
+    update_query = (
+        Post.update()
+        .where(Post.c.id == post_id)
+        .values(content=update_data.content, updated_at=datetime.utcnow())
+    )
+    await database.execute(update_query)
+
+    # 5. Fetch updated post to return
+    updated_post = await database.fetch_one(post_query)
+    
+    # Get platforms list
+    platforms_list = [Platform(t["platform"]) for t in targets if t["platform"] in Platform.__members__.values()]
+    if not platforms_list:
+        platforms_list = [Platform.FACEBOOK] # Fallback default
+        
+    return PostResponse(
+        id=updated_post['id'],
+        content=updated_post['content'],
+        media_key=get_presigned_download_url(updated_post['media_key']),
+        media_keys=[get_presigned_download_url(k) for k in json.loads(updated_post['media_keys'])] if updated_post['media_keys'] else None,
+        platforms=platforms_list,
+        is_reel=updated_post['is_reel'],
+        status=PostStatus(updated_post['status']),
+        created_at=updated_post['created_at'],
+        updated_at=updated_post['updated_at']
     )
 
 @app.get("/posts/{post_id}", response_model=PostResponse)
@@ -313,6 +489,7 @@ async def get_post(post_id: uuid.UUID):
         media_key=get_presigned_download_url(post['media_key']),
         media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
         platforms=[Platform.FACEBOOK], # Mocked
+        is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
         updated_at=post['updated_at']
@@ -353,6 +530,7 @@ async def list_posts(user_id: str):
             media_key=get_presigned_download_url(p['media_key']),
             media_keys=[get_presigned_download_url(k) for k in json.loads(p['media_keys'])] if p['media_keys'] else None,
             platforms=[Platform.FACEBOOK], # Mocked for list view for now
+            is_reel=p['is_reel'],
             status=PostStatus(p['status']),
             created_at=p['created_at'],
             updated_at=p['updated_at']

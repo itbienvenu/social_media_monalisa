@@ -7,10 +7,19 @@ export default function ConnectPage() {
     const USER_ID = "test-user"; // Hardcoded for MVP
 
     const handleConnect = async (platform: string) => {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            window.location.href = '/login';
+            return;
+        }
         setLoading(true);
         try {
-            const res = await fetch(`${API_URL}/auth/${platform}/connect?user_id=${USER_ID}`, {
-                method: 'POST'
+            const res = await fetch(`${API_URL}/auth/${platform}/connect`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'ngrok-skip-browser-warning': 'true'
+                }
             });
             const data = await res.json();
 
