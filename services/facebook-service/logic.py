@@ -390,10 +390,29 @@ class FacebookClient:
                      "shares": 3,
                      "views": 250
                  }
-            raise e
+            logger.warning(f"Facebook API error fetching metrics for post {platform_post_id}. Returning default zero metrics.")
+            return {
+                "likes": 0,
+                "comments": 0,
+                "shares": 0,
+                "views": 0
+            }
         except httpx.RequestError as e:
-            logger.error(f"Network Error: {e}")
-            raise e
+            logger.error(f"Network Error fetching post metrics: {e}")
+            return {
+                "likes": 0,
+                "comments": 0,
+                "shares": 0,
+                "views": 0
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error fetching metrics for post {platform_post_id}: {e}")
+            return {
+                "likes": 0,
+                "comments": 0,
+                "shares": 0,
+                "views": 0
+            }
 
     async def get_post_attachments(self, platform_post_id: str) -> list[str]:
         """
