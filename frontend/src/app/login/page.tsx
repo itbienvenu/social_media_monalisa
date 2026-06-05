@@ -27,8 +27,9 @@ export default function LoginPage() {
             const data = await res.json();
 
             if (res.ok) {
-                // Store token (in localStorage for MVP)
+                // Store token
                 localStorage.setItem('token', data.access_token);
+                localStorage.setItem('refreshToken', data.refresh_token);
                 router.push('/dashboard');
             } else {
                 setError(data.detail || 'Login failed');

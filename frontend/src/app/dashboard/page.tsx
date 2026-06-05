@@ -3,6 +3,7 @@
 import { useSearchParams, useRouter } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import SocialConnectModal from "../../components/SocialConnectModal";
+import { apiFetch } from "../../utils/api";
 
 function decodeJwt(token: string | null | undefined) {
     if (!token) return null;
@@ -64,18 +65,8 @@ function DashboardContent() {
         const fetchData = async () => {
             try {
                 const [connRes, postsRes] = await Promise.all([
-                    fetch(`${process.env.NEXT_PUBLIC_API_URL}/connections`, {
-                        headers: {
-                            'Authorization': `Bearer ${token}`,
-                            'ngrok-skip-browser-warning': 'true'
-                        }
-                    }),
-                    fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`, {
-                        headers: {
-                            'Authorization': `Bearer ${token}`,
-                            'ngrok-skip-browser-warning': 'true'
-                        }
-                    })
+                    apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/connections`),
+                    apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`)
                 ]);
 
                 if (connRes.ok) {
@@ -116,12 +107,8 @@ function DashboardContent() {
 
         setDisconnectLoading(platform);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/connections/${platform}`, {
-                method: 'DELETE',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/connections/${platform}`, {
+                method: 'DELETE'
             });
             if (res.ok) {
                 // Update state
@@ -151,20 +138,11 @@ function DashboardContent() {
         }
 
         try {
-            await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/sync`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
+            await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/sync`, {
+                method: 'POST'
             });
             // Refresh posts
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
-            });
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`);
             if (res.ok) setPosts(await res.json());
         } catch (e) {
             console.error(e);
@@ -193,12 +171,7 @@ function DashboardContent() {
         setMetricsLoading(true);
         
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${post.id}/metrics`, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
-            });
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${post.id}/metrics`);
             if (res.ok) {
                 setMetrics(await res.json());
             } else {
@@ -223,12 +196,10 @@ function DashboardContent() {
         
         setEditLoading(true);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${activeEditPost.id}`, {
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${activeEditPost.id}`, {
                 method: 'PUT',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ content: editContent })
             });
@@ -254,12 +225,8 @@ function DashboardContent() {
         if (!token) return;
 
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${post.id}`, {
-                method: 'DELETE',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${post.id}`, {
+                method: 'DELETE'
             });
             if (res.ok) {
                 setPosts(prev => prev.filter(p => p.id !== post.id));
@@ -281,12 +248,7 @@ function DashboardContent() {
 
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${activeMetricsPost.id}/metrics`, {
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'ngrok-skip-browser-warning': 'true'
-                    }
-                });
+                const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts/${activeMetricsPost.id}/metrics`);
                 if (res.ok) {
                     const data = await res.json();
                     setMetrics(data);

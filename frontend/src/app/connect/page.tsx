@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { apiFetch } from '../../utils/api';
 
 export default function ConnectPage() {
     const [loading, setLoading] = useState(false);
@@ -7,19 +8,10 @@ export default function ConnectPage() {
     const USER_ID = "test-user"; // Hardcoded for MVP
 
     const handleConnect = async (platform: string) => {
-        const token = localStorage.getItem('token');
-        if (!token) {
-            window.location.href = '/login';
-            return;
-        }
         setLoading(true);
         try {
-            const res = await fetch(`${API_URL}/auth/${platform}/connect`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
+            const res = await apiFetch(`${API_URL}/auth/${platform}/connect`, {
+                method: 'POST'
             });
             const data = await res.json();
 

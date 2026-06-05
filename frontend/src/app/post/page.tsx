@@ -1,5 +1,6 @@
 'use client';
 import { useState, ChangeEvent, useEffect } from 'react';
+import { apiFetch } from '../../utils/api';
 
 export default function PostPage() {
     const [content, setContent] = useState('');
@@ -19,16 +20,9 @@ export default function PostPage() {
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
     const fetchFacebookPages = async () => {
-        const token = localStorage.getItem('token');
-        if (!token) return;
         setLoadingPages(true);
         try {
-            const res = await fetch(`${API_URL}/facebook/targets`, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
-                }
-            });
+            const res = await apiFetch(`${API_URL}/facebook/targets`);
             if (res.ok) {
                 const data = await res.json();
                 const pagesOnly = data.filter((t: any) => t.target_type === 'page');
@@ -67,12 +61,8 @@ export default function PostPage() {
 
         // 1. Get Presigned URL
         const filename = `${Date.now()}-${file.name}`;
-        const res = await fetch(`${API_URL}/media/upload-url?filename=${filename}&content_type=${file.type}`, {
-            method: 'POST',
-            headers: { 
-                'Authorization': `Bearer ${token}`,
-                'ngrok-skip-browser-warning': 'true'
-            }
+        const res = await apiFetch(`${API_URL}/media/upload-url?filename=${filename}&content_type=${file.type}`, {
+            method: 'POST'
         });
 
         if (!res.ok) throw new Error("Failed to get upload URL");
@@ -133,12 +123,10 @@ export default function PostPage() {
 
             setMessage('Publishing post...');
             // 3. Create Post
-            const res = await fetch(`${API_URL}/posts`, {
+            const res = await apiFetch(`${API_URL}/posts`, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`,
-                    'ngrok-skip-browser-warning': 'true'
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     content: content,

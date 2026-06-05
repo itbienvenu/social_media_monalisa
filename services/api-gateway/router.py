@@ -221,6 +221,16 @@ async def login_proxy(request: Request):
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/auth/refresh")
+async def refresh_proxy(request: Request):
+    async with httpx.AsyncClient() as client:
+        try:
+            body = await request.json()
+            resp = await client.post("http://auth-service:8000/refresh", json=body)
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- Media Proxy ---
 
