@@ -83,16 +83,18 @@ class InstagramClient:
         # Step 1: Create Container
         container_url = f"{FACEBOOK_GRAPH_URL}/{self.instagram_account_id}/media"
         
-        # Determine media type (simplistic)
-        media_type = "VIDEO" if media_url.endswith(".mp4") else "IMAGE"
+        # Determine media type
+        lower_url = media_url.lower()
+        is_video = any(ext in lower_url for ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"])
+        media_type = "REELS" if is_video else "IMAGE"
         
         payload = {
             "caption": caption,
             "access_token": self.access_token
         }
         
-        if media_type == "VIDEO":
-            payload["media_type"] = "VIDEO"
+        if media_type == "REELS":
+            payload["media_type"] = "REELS"
             payload["video_url"] = media_url
         else:
             payload["image_url"] = media_url
@@ -113,10 +115,35 @@ class InstagramClient:
                 "access_token": self.access_token
             }
             
-            # Note: For video, we might need to wait for status=FINISHED. 
-            # Doing a small sleep here for simplicity, real impl needs polling.
-            if media_type == "VIDEO":
-                await asyncio.sleep(5) 
+            # For REELS / VIDEO, wait for status_code to be FINISHED
+            if media_type == "REELS":
+                status_url = f"{FACEBOOK_GRAPH_URL}/{container_id}"
+                status_params = {
+                    "fields": "status_code",
+                    "access_token": self.access_token
+                }
+                
+                max_retries = 30  # 30 retries * 5 seconds = 150 seconds max wait
+                poll_interval = 5
+                
+                logger.info(f"Polling Instagram container {container_id} status...")
+                for attempt in range(max_retries):
+                    await asyncio.sleep(poll_interval)
+                    status_resp = await self.client.get(status_url, params=status_params)
+                    status_resp.raise_for_status()
+                    status_data = status_resp.json()
+                    status_code = status_data.get("status_code")
+                    
+                    logger.info(f"Instagram container {container_id} status_code: {status_code} (attempt {attempt + 1}/{max_retries})")
+                    
+                    if status_code == "FINISHED":
+                        break
+                    elif status_code == "ERROR":
+                        raise Exception("Instagram video processing failed on their server.")
+                    elif status_code == "EXPIRED":
+                        raise Exception("Instagram media container expired.")
+                else:
+                    raise Exception("Instagram video processing timed out.")
                 
             logger.info(f"Publishing IG Media Container {container_id}...")
             resp2 = await self.client.post(publish_url, params=pub_payload)
@@ -130,6 +157,59 @@ class InstagramClient:
         except Exception as e:
              logger.error(f"IG Error: {e}")
              raise e
+
+    async def get_post_metrics(self, media_id: str) -> dict:
+        """
+        Fetches likes, comments, and permalink for an Instagram media object.
+        """
+        if "mock" in self.access_token:
+            return {
+                "likes": 42,
+                "comments": 7,
+                "shares": 0,
+                "views": 120,
+                "permalink": f"https://instagram.com/p/mock_{media_id}"
+            }
+            
+        url = f"{FACEBOOK_GRAPH_URL}/{media_id}"
+        params = {
+            "fields": "like_count,comments_count,permalink",
+            "access_token": self.access_token
+        }
+        try:
+            resp = await self.client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "likes": data.get("like_count", 0),
+                "comments": data.get("comments_count", 0),
+                "shares": 0,
+                "views": 0,
+                "permalink": data.get("permalink")
+            }
+        except Exception as e:
+            logger.error(f"Error fetching IG post metrics for {media_id}: {e}")
+            raise e
+
+    async def delete_post(self, media_id: str) -> bool:
+        """
+        Deletes a media object (post/reel/story) from Instagram.
+        """
+        if "mock" in self.access_token:
+            logger.info(f"Mock delete Instagram post {media_id}")
+            return True
+            
+        url = f"{FACEBOOK_GRAPH_URL}/{media_id}"
+        params = {
+            "access_token": self.access_token
+        }
+        try:
+            resp = await self.client.delete(url, params=params)
+            resp.raise_for_status()
+            return resp.json().get("success", False)
+        except Exception as e:
+            logger.error(f"Error deleting Instagram media {media_id}: {e}")
+            raise e
 
     async def close(self):
         await self.client.aclose()

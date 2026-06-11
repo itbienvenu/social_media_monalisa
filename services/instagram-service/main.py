@@ -244,6 +244,45 @@ async def get_feed(user_id: str):
     finally:
         await client.close()
 
+@app.get("/posts/{platform_post_id}/metrics")
+async def get_instagram_post_metrics(platform_post_id: str, user_id: str):
+    """
+    Fetches metrics (likes, comments, permalink) for a specific Instagram post.
+    """
+    query = SocialTarget.select().where(
+        (SocialTarget.c.user_id == user_id) & 
+        (SocialTarget.c.platform == "instagram")
+    )
+    target = await database.fetch_one(query)
+    if not target:
+        raise HTTPException(status_code=400, detail="Instagram credentials not found for this user")
+        
+    client = InstagramClient(target['access_token'], target['target_id'])
+    try:
+        metrics = await client.get_post_metrics(platform_post_id)
+        return metrics
+    except Exception as e:
+        logger.error(f"Error fetching Instagram metrics for {platform_post_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await client.close()
+
+@app.delete("/posts/{platform_post_id}")
+async def delete_instagram_post(platform_post_id: str, user_id: str):
+    """
+    Deletes an Instagram post from local reference. Note that the Instagram Graph API
+    does not support deleting media via the API, so it must be deleted manually on Instagram.
+    """
+    logger.warning(
+        f"Instagram Graph API does not support deleting media via the API. "
+        f"Removing local reference for post ID {platform_post_id} from dashboard."
+    )
+    return {
+        "status": "success", 
+        "deleted": True, 
+        "info": "Instagram Graph API does not support deleting media. Please delete manually on Instagram."
+    }
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

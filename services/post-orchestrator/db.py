@@ -62,3 +62,15 @@ PostLog = Table(
     Column("message", String, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
 )
+
+Notification = Table(
+    "notifications",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("user_id", String, index=True),
+    Column("title", String),
+    Column("message", String),
+    Column("type", String),  # e.g., 'success', 'error', 'info'
+    Column("read", sqlalchemy.Boolean, default=False, server_default="false"),
+    Column("created_at", DateTime, default=datetime.datetime.utcnow),
+)

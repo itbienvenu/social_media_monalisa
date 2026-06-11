@@ -31,6 +31,8 @@ function DashboardContent() {
     const router = useRouter();
     const [connections, setConnections] = useState<any[]>([]);
     const [posts, setPosts] = useState<any[]>([]);
+    const [notifications, setNotifications] = useState<any[]>([]);
+    const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
     const [loading, setLoading] = useState(true);
     const [syncLoading, setSyncLoading] = useState(false);
     const [disconnectLoading, setDisconnectLoading] = useState<string | null>(null);
@@ -64,9 +66,10 @@ function DashboardContent() {
 
         const fetchData = async () => {
             try {
-                const [connRes, postsRes] = await Promise.all([
+                const [connRes, postsRes, notifRes] = await Promise.all([
                     apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/connections`),
-                    apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`)
+                    apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`),
+                    apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/notifications`)
                 ]);
 
                 if (connRes.ok) {
@@ -91,6 +94,18 @@ function DashboardContent() {
                     setPosts([]);
                 }
 
+                if (notifRes.ok) {
+                    const text = await notifRes.text();
+                    try {
+                        setNotifications(JSON.parse(text));
+                    } catch (e) {
+                        console.error("Failed to parse notifications JSON:", text);
+                        setNotifications([]);
+                    }
+                } else {
+                    setNotifications([]);
+                }
+
                 setLoading(false);
             } catch (e) {
                 console.error("Error fetching data:", e);
@@ -100,6 +115,58 @@ function DashboardContent() {
 
         fetchData();
     }, [router]);
+
+    // Poll for notifications and posts updates every 8 seconds
+    useEffect(() => {
+        const token = localStorage.getItem('token');
+        if (!token) return;
+
+        const interval = setInterval(async () => {
+            try {
+                const [postsRes, notifRes] = await Promise.all([
+                    apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`),
+                    apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/notifications`)
+                ]);
+
+                if (postsRes.ok) {
+                    setPosts(await postsRes.json());
+                }
+                if (notifRes.ok) {
+                    setNotifications(await notifRes.json());
+                }
+            } catch (e) {
+                console.error("Error polling notifications/posts:", e);
+            }
+        }, 8000);
+
+        return () => clearInterval(interval);
+    }, []);
+
+    const handleMarkAsRead = async (id: string) => {
+        try {
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/notifications/${id}/read`, {
+                method: 'POST'
+            });
+            if (res.ok) {
+                setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const handleMarkAllAsRead = async () => {
+        try {
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/notifications/read-all`, {
+                method: 'POST'
+            });
+            if (res.ok) {
+                setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    };
 
     const handleDisconnect = async (platform: string) => {
         const token = localStorage.getItem('token');
@@ -218,7 +285,12 @@ function DashboardContent() {
     };
 
     const handleDeletePost = async (post: any) => {
-        if (!confirm("Are you sure you want to delete this post/reel from this dashboard and the connected platforms? This action is permanent and cannot be undone.")) {
+        const hasInstagram = post.platforms && post.platforms.includes("instagram");
+        const confirmMessage = hasInstagram
+            ? "This post was published to Instagram. Note that Instagram's API does not support deleting posts/Reels automatically. Deleting this post will remove it from this dashboard and other connected platforms (like Facebook), but you must manually delete it from the Instagram app/website on a real device.\n\nAre you sure you want to proceed?"
+            : "Are you sure you want to delete this post/reel from this dashboard and the connected platforms? This action is permanent and cannot be undone.";
+
+        if (!confirm(confirmMessage)) {
             return;
         }
         const token = localStorage.getItem('token');
@@ -273,8 +345,80 @@ function DashboardContent() {
         <div className="min-h-screen bg-gray-50 p-8">
             <main className="max-w-4xl mx-auto space-y-8">
                 <div className="flex justify-between items-center">
-                    <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
-                    <button onClick={() => { localStorage.removeItem('token'); router.push('/login'); }} className="text-red-600 hover:text-red-800 text-sm font-semibold">Logout</button>
+                    <h1 className="text-3xl font-bold text-gray-900 bg-gradient-to-r from-gray-900 to-gray-700 bg-clip-text text-transparent">Dashboard</h1>
+                    <div className="flex items-center gap-4 relative">
+                        {/* Notification Bell */}
+                        <div className="relative">
+                            <button
+                                onClick={() => setIsNotificationsOpen(!isNotificationsOpen)}
+                                className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-full transition relative focus:outline-none"
+                                title="Notifications"
+                            >
+                                <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                                </svg>
+                                {notifications.filter(n => !n.read).length > 0 && (
+                                    <span className="absolute top-1 right-1 block h-4 w-4 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center animate-pulse">
+                                        {notifications.filter(n => !n.read).length}
+                                    </span>
+                                )}
+                            </button>
+
+                            {isNotificationsOpen && (
+                                <div className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-xl border border-gray-100 z-50 overflow-hidden py-1 max-h-96 flex flex-col">
+                                    <div className="px-4 py-2 bg-gray-50 border-b border-gray-100 flex justify-between items-center shrink-0">
+                                        <span className="font-semibold text-sm text-gray-800">Notifications</span>
+                                        {notifications.some(n => !n.read) && (
+                                            <button
+                                                onClick={handleMarkAllAsRead}
+                                                className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                            >
+                                                Mark all read
+                                            </button>
+                                        )}
+                                    </div>
+                                    <div className="overflow-y-auto flex-1">
+                                        {notifications.length === 0 ? (
+                                            <div className="px-4 py-8 text-center text-gray-500 text-sm">
+                                                No notifications yet.
+                                            </div>
+                                        ) : (
+                                            notifications.map((notif) => (
+                                                <div
+                                                    key={notif.id}
+                                                    onClick={() => !notif.read && handleMarkAsRead(notif.id)}
+                                                    className={`px-4 py-3 border-b border-gray-50 last:border-0 hover:bg-gray-50 transition cursor-pointer flex gap-3 ${!notif.read ? 'bg-blue-50/40' : ''}`}
+                                                >
+                                                    <div className="mt-0.5 shrink-0">
+                                                        {notif.type === 'error' ? (
+                                                            <span className="h-2 w-2 rounded-full bg-red-500 block" />
+                                                        ) : notif.type === 'success' ? (
+                                                            <span className="h-2 w-2 rounded-full bg-green-500 block" />
+                                                        ) : (
+                                                            <span className="h-2 w-2 rounded-full bg-blue-500 block" />
+                                                        )}
+                                                    </div>
+                                                    <div className="flex-1 space-y-0.5">
+                                                        <div className={`text-xs ${!notif.read ? 'font-bold text-gray-900' : 'font-semibold text-gray-700'}`}>
+                                                            {notif.title}
+                                                        </div>
+                                                        <div className="text-[11px] text-gray-500 leading-normal break-words">
+                                                            {notif.message}
+                                                        </div>
+                                                        <div className="text-[9px] text-gray-400">
+                                                            {new Date(notif.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <button onClick={() => { localStorage.removeItem('token'); router.push('/login'); }} className="bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 px-3.5 py-1.5 rounded-lg text-sm font-semibold transition">Logout</button>
+                    </div>
                 </div>
 
                 {/* Connections Section */}
@@ -461,10 +605,11 @@ function DashboardContent() {
                                                         </div>
                                                     </td>
                                                     <td className="px-6 py-4 whitespace-nowrap">
-                                                        <span className={`px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full 
-                                                            ${post.status === 'completed' || post.status === 'success' || post.status === 'synced' ? 'bg-green-100 text-green-800' :
+                                                        <span className={`px-2.5 py-1 inline-flex text-xs leading-5 font-bold rounded-full capitalize
+                                                            ${post.status === 'completed' || post.status === 'success' || post.status === 'synced' || post.status === 'published' ? 'bg-green-100 text-green-800' :
                                                                 post.status === 'failed' ? 'bg-red-100 text-red-800' :
-                                                                    'bg-yellow-100 text-yellow-800'}`}>
+                                                                    post.status === 'partial' ? 'bg-amber-100 text-amber-800' :
+                                                                        'bg-yellow-100 text-yellow-800'}`}>
                                                             {post.status}
                                                         </span>
                                                     </td>
@@ -595,7 +740,12 @@ function DashboardContent() {
                                                     <div key={platform} className="p-3.5 border border-gray-100 rounded-xl hover:bg-gray-50 transition space-y-3">
                                                         <div className="flex justify-between items-center">
                                                             <span className="capitalize font-semibold text-gray-700 flex items-center gap-2">
-                                                                <span className={`w-2.5 h-2.5 rounded-full ${platform === 'facebook' ? 'bg-blue-600' : 'bg-gray-400'}`}></span>
+                                                                <span className={`w-2.5 h-2.5 rounded-full ${
+                                                                    platform === 'facebook' ? 'bg-[#1877F2]' : 
+                                                                    platform === 'instagram' ? 'bg-[#E1306C]' : 
+                                                                    platform === 'linkedin' ? 'bg-[#0A66C2]' : 
+                                                                    platform === 'tiktok' ? 'bg-black' : 'bg-gray-400'
+                                                                }`}></span>
                                                                 {platform}
                                                             </span>
                                                             <div className="flex items-center gap-4 text-xs font-bold text-gray-500">
@@ -612,7 +762,12 @@ function DashboardContent() {
                                                                         }
                                                                         target="_blank"
                                                                         rel="noopener noreferrer"
-                                                                        className="inline-flex items-center gap-1 bg-blue-50 text-blue-600 hover:bg-blue-100 hover:text-blue-700 px-2.5 py-1 rounded-md text-[10px] transition font-bold ml-1 uppercase tracking-wide border border-blue-100"
+                                                                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] transition font-bold ml-1 uppercase tracking-wide border ${
+                                                                            platform === 'facebook' ? 'bg-blue-50 text-blue-600 hover:bg-blue-100 hover:text-blue-700 border-blue-100' :
+                                                                            platform === 'instagram' ? 'bg-pink-50 text-pink-600 hover:bg-pink-100 hover:text-pink-700 border-pink-100' :
+                                                                            platform === 'linkedin' ? 'bg-sky-50 text-sky-600 hover:bg-sky-100 hover:text-sky-700 border-sky-100' :
+                                                                            'bg-gray-50 text-gray-600 hover:bg-gray-100 hover:text-gray-700 border-gray-100'
+                                                                        }`}
                                                                     >
                                                                         View Post ↗
                                                                     </a>

@@ -27,47 +27,13 @@ async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: st
             continue
         url = None
         if key.startswith("http://") or key.startswith("https://"):
-            # Extract key and bucket from public_url if it's our own
-            # public_url format: f"{base_url}/uploads/{bucket}/{object_key}"
-            if "/uploads/" in key:
-                parts = key.split("/uploads/", 1)[1].split("/", 1)
-                if len(parts) == 2:
-                    bucket_name, obj_key = parts
-                    try:
-                        s3_client = boto3.client(
-                            "s3",
-                            endpoint_url=S3_ENDPOINT,
-                            aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-                            aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
-                            config=boto3.session.Config(signature_version='s3v4')
-                        )
-                        url = s3_client.generate_presigned_url(
-                            'get_object',
-                            Params={'Bucket': bucket_name, 'Key': obj_key},
-                            ExpiresIn=3600
-                        )
-                    except Exception as e:
-                        url = f"{S3_ENDPOINT}/{bucket_name}/{obj_key}"
-                else:
-                    url = key
-            else:
-                url = key
+            # If the URL is already pointing to our public gateway (/uploads/), use it directly
+            url = key
         else:
-            try:
-                s3_client = boto3.client(
-                    "s3",
-                    endpoint_url=S3_ENDPOINT,
-                    aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-                    aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
-                    config=boto3.session.Config(signature_version='s3v4')
-                )
-                url = s3_client.generate_presigned_url(
-                    'get_object',
-                    Params={'Bucket': S3_BUCKET, 'Key': key},
-                    ExpiresIn=3600
-                )
-            except Exception as e:
-                url = f"{S3_ENDPOINT}/{S3_BUCKET}/{key}"
+            base_url = os.getenv("BASE_URL", "http://localhost:8000")
+            if base_url.endswith("/"):
+                base_url = base_url[:-1]
+            url = f"{base_url}/uploads/{S3_BUCKET}/{key}"
         media_urls.append(url)
 
     if media_urls:

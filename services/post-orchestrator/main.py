@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from libs.common.serializers import PostCreate, PostResponse, PostStatus, Platform
-from services.post_orchestrator.db import database, Post, PostTarget, PostLog, metadata
+from services.post_orchestrator.db import database, Post, PostTarget, PostLog, Notification, metadata
 import sqlalchemy
 import asyncio
 from services.post_orchestrator.media import generate_upload_url, delete_media_files, get_presigned_download_url
@@ -13,8 +13,75 @@ import logging
 from libs.common.db import connect_db_with_retry
 from libs.common.logger import log_post_stage
 
+import re
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("post-orchestrator")
+
+def sanitize_error_message(message: str) -> str:
+    if not message:
+        return message
+    message = re.sub(r'access_token=[^&\s\'"]+', 'access_token=***', message)
+    message = re.sub(r'client_secret=[^&\s\'"]+', 'client_secret=***', message)
+    message = re.sub(r'code=[^&\s\'"]+', 'code=***', message)
+    message = re.sub(r'/uploads(/uploads)+', '/uploads', message)
+    return message
+
+def make_user_friendly_error(message: str) -> str:
+    message = sanitize_error_message(message)
+    def clean_url_match(match):
+        url = match.group(0)
+        base_url = url.split('?')[0]
+        return base_url + "..." if '?' in url else base_url
+    message = re.sub(r'https?://[^\s\'"]+', clean_url_match, message)
+    return message
+
+async def update_post_overall_status(post_uuid: uuid.UUID, cdn_urls: list = None):
+    # Fetch all targets
+    all_targets_query = PostTarget.select().where(PostTarget.c.post_id == post_uuid)
+    targets = await database.fetch_all(all_targets_query)
+    statuses = [t["status"] for t in targets]
+    
+    if not statuses:
+        return
+        
+    if all(s == "published" for s in statuses):
+        overall_status = PostStatus.PUBLISHED.value
+    elif all(s == "failed" for s in statuses):
+        overall_status = PostStatus.FAILED.value
+    elif any(s in ("pending", "processing") for s in statuses):
+        overall_status = PostStatus.PROCESSING.value
+    else:
+        # Mix of published and failed, and no pending/processing
+        overall_status = PostStatus.PARTIAL.value
+        
+    update_vals = {
+        "status": overall_status,
+        "updated_at": datetime.utcnow()
+    }
+    if cdn_urls:
+        update_vals["media_key"] = cdn_urls[0]
+        update_vals["media_keys"] = json.dumps(cdn_urls)
+        
+    query = Post.update().where(Post.c.id == post_uuid).values(**update_vals)
+    await database.execute(query)
+    logger.info(f"Updated main post {post_uuid} overall status to {overall_status}")
+
+async def create_notification(user_id: str, title: str, message: str, notification_type: str):
+    try:
+        query = Notification.insert().values(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            title=title,
+            message=message,
+            type=notification_type,
+            read=False,
+            created_at=datetime.utcnow()
+        )
+        await database.execute(query)
+        logger.info(f"Created {notification_type} notification for user {user_id}: {title}")
+    except Exception as e:
+        logger.error(f"Failed to create notification: {e}")
 
 async def handle_post_success(data: dict, platform: str):
     post_id = data.get("post_id")
@@ -46,25 +113,17 @@ async def handle_post_success(data: dict, platform: str):
         existing_post = await database.fetch_one(post_query)
         
         original_keys = []
-        if existing_post and existing_post["media_keys"]:
-            try:
-                original_keys = json.loads(existing_post["media_keys"])
-            except Exception:
-                original_keys = [existing_post["media_keys"]]
+        user_id = None
+        if existing_post:
+            user_id = existing_post["user_id"]
+            if existing_post["media_keys"]:
+                try:
+                    original_keys = json.loads(existing_post["media_keys"])
+                except Exception:
+                    original_keys = [existing_post["media_keys"]]
         
-        # Update main post status to published and swap media keys if CDN URLs exist
-        update_vals = {
-            "status": PostStatus.PUBLISHED.value,
-            "updated_at": datetime.utcnow()
-        }
-        
-        if cdn_urls:
-            update_vals["media_key"] = cdn_urls[0]
-            update_vals["media_keys"] = json.dumps(cdn_urls)
-            
-        query = Post.update().where(Post.c.id == post_uuid).values(**update_vals)
-        await database.execute(query)
-        logger.info(f"Successfully updated post {post_id} target ({platform}) to PUBLISHED in DB")
+        # Update main post status dynamically
+        await update_post_overall_status(post_uuid, cdn_urls)
         
         # 3. Clean up the original local MinIO files since Facebook has copied them to its CDN
         if cdn_urls and original_keys:
@@ -86,16 +145,25 @@ async def handle_post_success(data: dict, platform: str):
                 fut.add_done_callback(cleanup_done_callback)
                 logger.info(f"Triggered background cleanup of {len(local_keys_to_delete)} local MinIO files for post {post_id}")
             
+        # 4. Send success notification
+        if user_id:
+            title = f"Posted to {platform.capitalize()}"
+            message = f"Your post was successfully published to {platform.capitalize()}."
+            await create_notification(user_id, title, message, "success")
+            
     except Exception as e:
         logger.error(f"Failed to update post success in DB: {e}")
 
 async def handle_post_failed(data: dict, platform: str):
     post_id = data.get("post_id")
-    reason = data.get("reason", "unknown error")
-    logger.info(f"Received failed event for post {post_id} on platform {platform} due to: {reason}")
+    raw_reason = data.get("reason", "unknown error")
+    sanitized_reason = sanitize_error_message(raw_reason)
+    user_friendly_reason = make_user_friendly_error(raw_reason)
+
+    logger.info(f"Received failed event for post {post_id} on platform {platform} due to: {sanitized_reason}")
     await log_post_stage(
         database, post_id, "orchestrator", "platform_failed", "ERROR",
-        f"Platform '{platform}' posting failed. Reason: {reason}"
+        f"Platform '{platform}' posting failed. Reason: {sanitized_reason}"
     )
     try:
         post_uuid = uuid.UUID(post_id)
@@ -109,27 +177,20 @@ async def handle_post_failed(data: dict, platform: str):
         )
         await database.execute(target_query)
 
-        # 2. Check if ALL targets for this post have failed
-        # If all have failed, set the main post status to failed
-        all_targets_query = PostTarget.select().where(PostTarget.c.post_id == post_uuid)
-        targets = await database.fetch_all(all_targets_query)
-        statuses = [t["status"] for t in targets]
-        if all(s == "failed" for s in statuses):
-            query = Post.update().where(Post.c.id == post_uuid).values(
-                status=PostStatus.FAILED.value,
-                updated_at=datetime.utcnow()
-            )
-            await database.execute(query)
-            logger.info(f"Successfully updated main post {post_id} to FAILED in DB (all targets failed)")
-        else:
-            # If at least one target succeeded, main post status might be published
-            if any(s == "published" for s in statuses):
-                query = Post.update().where(Post.c.id == post_uuid).values(
-                    status=PostStatus.PUBLISHED.value,
-                    updated_at=datetime.utcnow()
-                )
-                await database.execute(query)
-            logger.info(f"Updated post target {platform} to FAILED for post {post_id}")
+        # 2. Get user_id for notifications
+        post_query = Post.select().where(Post.c.id == post_uuid)
+        existing_post = await database.fetch_one(post_query)
+        user_id = existing_post["user_id"] if existing_post else None
+
+        # 3. Update main post status dynamically
+        await update_post_overall_status(post_uuid)
+        
+        # 4. Send failure notification
+        if user_id:
+            title = f"Failed to post to {platform.capitalize()}"
+            message = f"Failed to publish to {platform.capitalize()}: {user_friendly_reason}"
+            await create_notification(user_id, title, message, "error")
+            
     except Exception as e:
         logger.error(f"Failed to update post failure in DB: {e}")
 
@@ -700,3 +761,25 @@ async def get_post_metrics(post_id: uuid.UUID, user_id: str):
         "platforms": metrics_by_platform,
         "total": total_metrics
     }
+
+
+@app.get("/notifications")
+async def get_notifications(user_id: str):
+    query = Notification.select().where(Notification.c.user_id == user_id).order_by(Notification.c.created_at.desc())
+    return await database.fetch_all(query)
+
+
+@app.post("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: uuid.UUID, user_id: str):
+    query = Notification.update().where(
+        (Notification.c.id == notification_id) & (Notification.c.user_id == user_id)
+    ).values(read=True)
+    await database.execute(query)
+    return {"status": "success"}
+
+
+@app.post("/notifications/read-all")
+async def mark_all_notifications_read(user_id: str):
+    query = Notification.update().where(Notification.c.user_id == user_id).values(read=True)
+    await database.execute(query)
+    return {"status": "success"}

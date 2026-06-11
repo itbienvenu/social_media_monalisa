@@ -289,17 +289,10 @@ async def upload_url_proxy(
 @router.get("/uploads/{bucket}/{key:path}")
 async def get_upload_proxy(
     bucket: str, 
-    key: str,
-    user_info: dict = Depends(verify_token)
+    key: str
 ):
-    token_user_id = user_info.get("user_id")
-    
-    # Enforce user ownership
-    key_parts = key.strip("/").split("/")
-    if len(key_parts) >= 2 and key_parts[0] == "uploads":
-        file_user_id = key_parts[1]
-        if file_user_id != token_user_id:
-            raise HTTPException(status_code=403, detail="Forbidden: You do not own this resource")
+    # Public endpoint to allow external social media platforms (Facebook, Instagram, etc.) to fetch the media files
+
             
     import boto3
     from botocore.exceptions import ClientError
@@ -322,6 +315,63 @@ async def get_upload_proxy(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# --- Notifications Proxy ---
+
+@router.get("/notifications")
+async def get_notifications(
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{POST_ORCHESTRATOR_URL}/notifications",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: str,
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{POST_ORCHESTRATOR_URL}/notifications/{notification_id}/read",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/notifications/read-all")
+async def mark_all_notifications_read(
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{POST_ORCHESTRATOR_URL}/notifications/read-all",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 FACEBOOK_SERVICE_URL = "http://facebook-service:8000"
