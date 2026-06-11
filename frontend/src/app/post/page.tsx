@@ -17,7 +17,27 @@ export default function PostPage() {
     const [selectedFacebookPage, setSelectedFacebookPage] = useState<string>('');
     const [loadingPages, setLoadingPages] = useState<boolean>(false);
 
+    // Account connections
+    const [connections, setConnections] = useState<{ platform: string; connected: boolean }[]>([]);
+    const [loadingConnections, setLoadingConnections] = useState(true);
+
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
+
+    useEffect(() => {
+        const fetchConnections = async () => {
+            try {
+                const res = await apiFetch(`${API_URL}/connections`);
+                if (res.ok) {
+                    setConnections(await res.json());
+                }
+            } catch (err) {
+                console.error("Failed to fetch connections:", err);
+            } finally {
+                setLoadingConnections(false);
+            }
+        };
+        fetchConnections();
+    }, [API_URL]);
 
     const fetchFacebookPages = async () => {
         setLoadingPages(true);
@@ -243,22 +263,62 @@ export default function PostPage() {
 
                         {/* Platforms */}
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Select Platforms</label>
-                            <div className="flex space-x-4">
-                                {['facebook', 'instagram', 'tiktok', 'linkedin'].map(p => (
-                                    <button
-                                        key={p}
-                                        type="button"
-                                        onClick={() => togglePlatform(p)}
-                                        className={`px-4 py-2 rounded-full border capitalize transition ${platforms.includes(p)
-                                            ? 'bg-blue-600 text-white border-blue-600 shadow-md transform scale-105'
-                                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                                            }`}
-                                    >
-                                        {p}
-                                    </button>
-                                ))}
-                            </div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">Select Target Platforms</label>
+                            {loadingConnections ? (
+                                <p className="text-sm text-gray-500 animate-pulse">Checking connected accounts...</p>
+                            ) : (
+                                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                    {[
+                                        { id: 'facebook', name: 'Facebook', color: 'bg-[#1877F2] border-[#1877F2] text-white', icon: '📘' },
+                                        { id: 'instagram', name: 'Instagram', color: 'bg-gradient-to-r from-[#833AB4] via-[#FD1D1D] to-[#FCAF45] border-transparent text-white', icon: '📸' },
+                                        { id: 'tiktok', name: 'TikTok', color: 'bg-black border-black text-white', icon: '🎵' },
+                                        { id: 'linkedin', name: 'LinkedIn', color: 'bg-[#0077b5] border-[#0077b5] text-white', icon: '💼' }
+                                    ].map(p => {
+                                        const conn = connections.find(c => c.platform === p.id);
+                                        const isConnected = conn ? conn.connected : false;
+                                        const isSelected = platforms.includes(p.id);
+                                        
+                                        return (
+                                            <button
+                                                key={p.id}
+                                                type="button"
+                                                disabled={!isConnected}
+                                                onClick={() => togglePlatform(p.id)}
+                                                className={`relative flex flex-col items-center justify-center p-4 rounded-xl border text-sm font-bold transition-all duration-200 select-none ${
+                                                    !isConnected 
+                                                        ? 'bg-gray-50 border-gray-200 text-gray-400 cursor-not-allowed opacity-60' 
+                                                        : isSelected
+                                                            ? `${p.color} shadow-lg ring-2 ring-offset-2 ring-blue-500 transform scale-[1.02]`
+                                                            : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                                                }`}
+                                            >
+                                                <span className="text-2xl mb-1">{p.icon}</span>
+                                                <span className="capitalize">{p.name}</span>
+                                                {!isConnected && (
+                                                    <span className="absolute top-1.5 right-1.5 text-[9px] bg-gray-200 text-gray-600 px-1 py-0.5 rounded font-bold">
+                                                        Offline
+                                                    </span>
+                                                )}
+                                                {isConnected && !isSelected && (
+                                                    <span className="absolute top-1.5 right-1.5 text-[9px] bg-green-100 text-green-700 px-1 py-0.5 rounded font-bold">
+                                                        Ready
+                                                    </span>
+                                                )}
+                                                {isConnected && isSelected && (
+                                                    <span className="absolute top-1.5 right-1.5 text-[9px] bg-white text-blue-600 px-1 py-0.5 rounded font-black shadow-sm">
+                                                        ✓
+                                                    </span>
+                                                )}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                            {!loadingConnections && connections.filter(c => c.connected).length === 0 && (
+                                <p className="text-xs text-red-500 mt-2 font-semibold">
+                                    No accounts connected. Please go to the <a href="/dashboard" className="underline font-bold text-blue-600">Dashboard</a> to connect accounts before posting.
+                                </p>
+                            )}
                         </div>
 
                         {/* Facebook Page Selection */}

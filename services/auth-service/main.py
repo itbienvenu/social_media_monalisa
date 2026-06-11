@@ -1,5 +1,5 @@
 # pyright: ignore [reportMissingImport]
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 import logging
 import os
 import datetime
@@ -244,3 +244,99 @@ async def health():
             status_code=503,
             content={"status": "error", "database": "disconnected", "detail": "Database connection error"}
         )
+
+@app.get("/auth/google/url")
+async def get_google_auth_url():
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+    BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+    REDIRECT_URI = f"{BASE_URL}/auth/google/callback"
+    MOCK_MODE = os.getenv("MOCK_MODE", "false")
+
+    if MOCK_MODE == "true" or not GOOGLE_CLIENT_ID:
+        mock_callback_url = f"{BASE_URL}/auth/google/callback?code=mock_google_code"
+        return {"url": mock_callback_url}
+
+    scopes = "openid email profile"
+    auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth?"
+        f"client_id={GOOGLE_CLIENT_ID}&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"response_type=code&"
+        f"scope={scopes}&"
+        f"access_type=offline&"
+        f"prompt=consent"
+    )
+    return {"url": auth_url}
+
+@app.get("/auth/google/callback")
+async def google_callback(code: str):
+    import httpx
+    import uuid
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+    BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    REDIRECT_URI = f"{BASE_URL}/auth/google/callback"
+    MOCK_MODE = os.getenv("MOCK_MODE", "false")
+
+    email = None
+
+    if MOCK_MODE == "true" or code == "mock_google_code" or not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        email = "mock_google_user@example.com"
+        logger.info(f"Mocking Google Auth Callback for email: {email}")
+    else:
+        token_url = "https://oauth2.googleapis.com/token"
+        data = {
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": REDIRECT_URI,
+            "grant_type": "authorization_code"
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(token_url, data=data)
+                resp.raise_for_status()
+                token_data = resp.json()
+                access_token = token_data.get("access_token")
+                
+                userinfo_url = "https://www.googleapis.com/oauth2/v3/userinfo"
+                headers = {"Authorization": f"Bearer {access_token}"}
+                userinfo_resp = await client.get(userinfo_url, headers=headers)
+                userinfo_resp.raise_for_status()
+                userinfo = userinfo_resp.json()
+                email = userinfo.get("email")
+            except Exception as e:
+                logger.error(f"Failed to complete Google OAuth exchange: {e}")
+                return RedirectResponse(url=f"{FRONTEND_URL}/login?error=Google auth failed")
+
+    if not email:
+        return RedirectResponse(url=f"{FRONTEND_URL}/login?error=Failed to retrieve email from Google")
+
+    query = users.select().where(users.c.email == email)
+    db_user = await database.fetch_one(query)
+    
+    user_id = None
+    if not db_user:
+        user_id = str(uuid.uuid4())
+        import secrets
+        dummy_password = secrets.token_hex(16)
+        hashed_pw = get_password_hash(dummy_password)
+        
+        insert_query = users.insert().values(
+            id=user_id,
+            email=email,
+            hashed_password=hashed_pw,
+            is_active=True
+        )
+        await database.execute(insert_query)
+        logger.info(f"New user registered via Google: {email}")
+    else:
+        user_id = db_user['id']
+        logger.info(f"Existing user logged in via Google: {email}")
+
+    access_token = create_access_token(data={"sub": user_id, "email": email})
+    refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
+
+    redirect_url = f"{FRONTEND_URL}/login?access_token={access_token}&refresh_token={refresh_token}"
+    return RedirectResponse(url=redirect_url)

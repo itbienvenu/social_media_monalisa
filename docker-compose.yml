@@ -59,6 +59,11 @@ services:
       - DB_PORT=5432
       - DB_NAME=${POSTGRES_DB:-social_platform}
       - SECRET_KEY=${SECRET_KEY}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - BASE_URL=${BASE_URL:-http://localhost:8000}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - MOCK_MODE=${MOCK_MODE:-false}
     depends_on:
       - db
     volumes:
@@ -85,6 +90,7 @@ services:
     volumes:
       - ./services/api-gateway:/app/services/api_gateway
       - ./libs:/app/libs
+    command: uvicorn services.api_gateway.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - backend-network
 
@@ -129,13 +135,14 @@ services:
       - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
       - BASE_URL=${BASE_URL:-http://localhost:8000}
       - LOGIN_REDIRECT_URL=${LOGIN_REDIRECT_URL}
-      - MOCK_MODE=false
+      - MOCK_MODE=${MOCK_MODE:-false}
     depends_on:
       - db
     restart: always
     volumes:
       - ./services/facebook-service:/app/services/facebook_service
       - ./libs:/app/libs
+    command: uvicorn services.facebook_service.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - backend-network
 
@@ -161,6 +168,10 @@ services:
     depends_on:
       - db
       - rabbitmq
+    volumes:
+      - ./services/tiktok-service:/app/services/tiktok_service
+      - ./libs:/app/libs
+    command: uvicorn services.tiktok_service.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - backend-network
 
@@ -197,6 +208,10 @@ services:
       - LINKEDIN_CLIENT_SECRET=${LINKEDIN_CLIENT_SECRET}
       - BASE_URL=${BASE_URL:-http://localhost:8000}
       - LOGIN_REDIRECT_URL=${LOGIN_REDIRECT_URL}
+    volumes:
+      - ./services/linkedin-service:/app/services/linkedin_service
+      - ./libs:/app/libs
+    command: uvicorn services.linkedin_service.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - backend-network
 
@@ -213,6 +228,9 @@ services:
       - DB_NAME=${POSTGRES_DB:-social_platform}
     depends_on:
       - db
+    volumes:
+      - ./services/analytics-collector:/app/services/analytics_collector
+      - ./libs:/app/libs
     networks:
       - backend-network
 
@@ -231,6 +249,11 @@ services:
       - DB_NAME=${POSTGRES_DB:-social_platform}
     depends_on:
       - db
+    volumes:
+      - ./services/analytics-api:/app/services/analytics_api
+      - ./services/analytics-collector/models.py:/app/services/analytics_api/models.py
+      - ./libs:/app/libs
+    command: uvicorn services.analytics_api.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - backend-network
 
@@ -240,7 +263,8 @@ services:
       dockerfile: services/instagram-service/Dockerfile
     environment:
       - PYTHONDONTWRITEBYTECODE=1
-      - MOCK_MODE=false
+      - PYTHONPATH=/app
+      - MOCK_MODE=${MOCK_MODE:-false}
       - DB_USER=${POSTGRES_USER:-user}
       - DB_PASSWORD=${POSTGRES_PASSWORD:-password}
       - DB_HOST=db
@@ -250,6 +274,10 @@ services:
       - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
       - BASE_URL=${BASE_URL:-http://localhost:8000}
       - LOGIN_REDIRECT_URL=${LOGIN_REDIRECT_URL}
+    volumes:
+      - ./services/instagram-service:/app/services/instagram_service
+      - ./libs:/app/libs
+    command: uvicorn services.instagram_service.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - backend-network
 

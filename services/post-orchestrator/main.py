@@ -483,12 +483,28 @@ async def get_post(post_id: uuid.UUID):
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
         
+    targets_query = PostTarget.select().where(PostTarget.c.post_id == post_id)
+    targets = await database.fetch_all(targets_query)
+    platforms = []
+    for t in targets:
+        try:
+            platforms.append(Platform(t["platform"]))
+        except ValueError:
+            pass
+    if not platforms and post["platform"]:
+        try:
+            platforms.append(Platform(post["platform"]))
+        except ValueError:
+            pass
+    if not platforms:
+        platforms = [Platform.FACEBOOK]
+        
     return PostResponse(
         id=post['id'],
         content=post['content'],
         media_key=get_presigned_download_url(post['media_key']),
         media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
-        platforms=[Platform.FACEBOOK], # Mocked
+        platforms=platforms,
         is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
@@ -522,20 +538,45 @@ async def list_posts(user_id: str):
     query = Post.select().where(Post.c.user_id == user_id).order_by(Post.c.created_at.desc())
     posts = await database.fetch_all(query)
     
+    if not posts:
+        return []
+        
+    post_ids = [p['id'] for p in posts]
+    targets_query = PostTarget.select().where(PostTarget.c.post_id.in_(post_ids))
+    targets = await database.fetch_all(targets_query)
+    
+    from collections import defaultdict
+    post_platforms = defaultdict(list)
+    for t in targets:
+        try:
+            post_platforms[t["post_id"]].append(Platform(t["platform"]))
+        except ValueError:
+            pass
+            
     import json
-    return [
-        PostResponse(
+    results = []
+    for p in posts:
+        platforms = post_platforms[p['id']]
+        if not platforms:
+            if p['platform']:
+                try:
+                    platforms = [Platform(p['platform'])]
+                except ValueError:
+                    platforms = [Platform.FACEBOOK]
+            else:
+                platforms = [Platform.FACEBOOK]
+        results.append(PostResponse(
             id=p['id'],
             content=p['content'],
             media_key=get_presigned_download_url(p['media_key']),
             media_keys=[get_presigned_download_url(k) for k in json.loads(p['media_keys'])] if p['media_keys'] else None,
-            platforms=[Platform.FACEBOOK], # Mocked for list view for now
+            platforms=platforms,
             is_reel=p['is_reel'],
             status=PostStatus(p['status']),
             created_at=p['created_at'],
             updated_at=p['updated_at']
-        ) for p in posts
-    ]
+        ))
+    return results
 
 @app.post("/media/upload-url")
 async def get_upload_url(filename: str, user_id: str, content_type: str = "image/jpeg"):
@@ -563,6 +604,7 @@ async def sync_posts(user_id: str):
     # Ideally we'd ask a central registry or check credentials, but for simplicity we'll try all known services
     services = [
         {"name": "facebook", "url": "http://facebook-service:8000/feed"},
+        {"name": "instagram", "url": "http://instagram-service:8000/feed"},
         # Add others as implemented:
         # {"name": "linkedin", "url": "http://linkedin-service:8000/feed"},
     ]

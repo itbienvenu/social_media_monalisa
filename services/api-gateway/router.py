@@ -231,6 +231,36 @@ async def refresh_proxy(request: Request):
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/auth/google/url")
+async def get_google_auth_url():
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get("http://auth-service:8000/auth/google/url")
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/auth/google/callback")
+async def google_callback(code: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                "http://auth-service:8000/auth/google/callback",
+                params={"code": code},
+                follow_redirects=False
+            )
+            if resp.status_code in (301, 302, 307, 308):
+                return RedirectResponse(url=resp.headers["location"], status_code=resp.status_code)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- Media Proxy ---
 

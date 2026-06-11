@@ -403,6 +403,7 @@ function DashboardContent() {
                                             <tr>
                                                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Content</th>
                                                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Type</th>
+                                                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Platforms</th>
                                                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
                                                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
                                                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
@@ -441,6 +442,23 @@ function DashboardContent() {
                                                                 Feed Post
                                                             </span>
                                                         )}
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <div className="flex gap-1.5 flex-wrap max-w-[150px]">
+                                                            {post.platforms && post.platforms.map((p: string) => {
+                                                                let emoji = "🌐";
+                                                                if (p === "facebook") emoji = "📘";
+                                                                if (p === "instagram") emoji = "📸";
+                                                                if (p === "tiktok") emoji = "🎵";
+                                                                if (p === "linkedin") emoji = "💼";
+                                                                return (
+                                                                    <span key={p} className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-gray-100 text-gray-800 capitalize border border-gray-200" title={p}>
+                                                                        <span>{emoji}</span>
+                                                                        <span>{p}</span>
+                                                                    </span>
+                                                                );
+                                                            })}
+                                                        </div>
                                                     </td>
                                                     <td className="px-6 py-4 whitespace-nowrap">
                                                         <span className={`px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full 

@@ -25,6 +25,9 @@ class InstagramClient:
             "access_token": self.access_token,
             "fields": "id,name,instagram_business_account{id,name,username}"
         }
+        if "mock" in self.access_token:
+            return [{"id": "mock_ig_123", "name": "Mock IG Business", "page_id": "mock_page_123"}]
+            
         try:
             response = await self.client.get(url, params=params)
             response.raise_for_status()
@@ -44,8 +47,33 @@ class InstagramClient:
             
         except Exception as e:
             logger.error(f"Error fetching IG accounts: {e}")
+            raise e
+
+    async def get_instagram_posts(self) -> list[dict]:
+        """
+        Fetches media (posts/reels) from the connected Instagram account.
+        """
+        url = f"{FACEBOOK_GRAPH_URL}/{self.instagram_account_id}/media"
+        params = {
+            "access_token": self.access_token,
+            "fields": "id,caption,timestamp,media_url,permalink"
+        }
+        try:
             if "mock" in self.access_token:
-                return [{"id": "mock_ig_123", "name": "Mock IG Business", "page_id": "mock_page_123"}]
+                return [
+                    {
+                        "id": "mock_ig_post_1",
+                        "caption": "Throwback Thursday! #tbt",
+                        "timestamp": "2026-06-10T12:00:00+0000",
+                        "media_url": "https://placehold.co/600x400.png",
+                        "permalink": "https://instagram.com/p/mock_ig_post_1"
+                    }
+                ]
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+            return response.json().get("data", [])
+        except Exception as e:
+            logger.error(f"Error fetching IG posts: {e}")
             raise e
 
     async def post_media(self, media_url: str, caption: str) -> dict:

@@ -105,6 +105,10 @@ async def connect_instagram(user_id: str):
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
     REDIRECT_URI = f"{base_url}/auth/instagram/callback"
     
+    if os.getenv("MOCK_MODE") == "true" or not FACEBOOK_APP_ID:
+        mock_callback_url = f"{base_url}/auth/instagram/callback?code=mock_code&state={user_id}"
+        return {"url": mock_callback_url}
+        
     # Scopes needed for Instagram Graph API
     SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
     
@@ -130,11 +134,12 @@ async def instagram_callback(code: str, state: str):
          raise HTTPException(status_code=400, detail="Missing code")
 
     user_id = state
-    
     user_access_token = None
     
     # 1. Exchange Code for Access Token (Same as FB)
-    if FACEBOOK_APP_ID and FACEBOOK_APP_SECRET:
+    if os.getenv("MOCK_MODE") == "true" or code == "mock_code":
+        user_access_token = f"EAAI_mock_instagram_token_for_{user_id}"
+    elif FACEBOOK_APP_ID and FACEBOOK_APP_SECRET:
          api_version = os.getenv("FACEBOOK_API_VERSION", "v18.0")
          base_url = os.getenv("BASE_URL", "http://localhost:8000")
          token_url = f"https://graph.facebook.com/{api_version}/oauth/access_token"
@@ -151,10 +156,13 @@ async def instagram_callback(code: str, state: str):
                 user_access_token = resp.json().get("access_token")
             except Exception as e:
                 logger.error(f"Failed to exchange token with Facebook for IG: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
+                if os.getenv("MOCK_MODE") == "true":
+                    user_access_token = f"EAAI_mock_instagram_token_for_{user_id}"
+                else:
+                    raise HTTPException(status_code=500, detail=str(e))
 
     if not user_access_token:
-         raise HTTPException(status_code=500, detail="Configuration missing or Auth failed")
+        raise HTTPException(status_code=500, detail="Configuration missing or Auth failed")
     
     # 1. Fetch connected IG Business Accounts
     client = InstagramClient(user_access_token, "me") # "me" only for account fetch context
@@ -201,6 +209,40 @@ async def delete_credentials(user_id: str):
     query = SocialTarget.delete().where(SocialTarget.c.user_id == user_id)
     await database.execute(query)
     return {"status": "deleted"}
+
+@app.get("/feed")
+async def get_feed(user_id: str):
+    """
+    Fetches posts from the connected Instagram account.
+    """
+    query = SocialTarget.select().where(
+        (SocialTarget.c.user_id == user_id) & 
+        (SocialTarget.c.platform == "instagram")
+    ).limit(1)
+    target = await database.fetch_one(query)
+    
+    if not target:
+        return []
+        
+    client = InstagramClient(target['access_token'], target['target_id'])
+    try:
+        posts = await client.get_instagram_posts()
+        
+        normalized_posts = []
+        for p in posts:
+            normalized_posts.append({
+                "original_id": p['id'],
+                "content": p.get('caption', ''),
+                "created_at": p.get('timestamp'),
+                "platform": "instagram",
+                "permalink": p.get('permalink')
+            })
+        return normalized_posts
+    except Exception as e:
+        logger.error(f"Error fetching Instagram feed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await client.close()
 
 @app.get("/health")
 async def health():
