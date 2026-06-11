@@ -25,6 +25,10 @@ class PostBase(BaseModel):
     platforms: List[Platform]
     is_reel: Optional[bool] = False
     facebook_page_id: Optional[str] = None
+    audio_key: Optional[str] = None
+    music_volume: Optional[float] = 0.2
+    video_volume: Optional[float] = 1.0
+    slideshow_duration: Optional[int] = 10
 
     @field_validator("media_keys")
     @classmethod

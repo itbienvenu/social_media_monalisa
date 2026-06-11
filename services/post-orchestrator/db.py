@@ -33,6 +33,10 @@ Post = Table(
     Column("is_reel", sqlalchemy.Boolean, default=False, server_default="false"),
     Column("status", String, default=PostStatus.PENDING.value),
     Column("user_id", String, index=True, nullable=True),
+    Column("audio_key", String, nullable=True),
+    Column("music_volume", sqlalchemy.Float, nullable=True),
+    Column("video_volume", sqlalchemy.Float, nullable=True),
+    Column("slideshow_duration", sqlalchemy.Integer, nullable=True),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.datetime.utcnow),
     # New columns for historical sync

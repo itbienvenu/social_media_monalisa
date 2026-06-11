@@ -223,6 +223,18 @@ async def lifespan(app: FastAPI):
                 if "is_reel" not in columns:
                     conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN is_reel BOOLEAN DEFAULT FALSE"))
                     logger.info("Migrated schema: Added column is_reel to posts table")
+                if "audio_key" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN audio_key VARCHAR"))
+                    logger.info("Migrated schema: Added column audio_key to posts table")
+                if "music_volume" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN music_volume DOUBLE PRECISION DEFAULT 0.2"))
+                    logger.info("Migrated schema: Added column music_volume to posts table")
+                if "video_volume" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN video_volume DOUBLE PRECISION DEFAULT 1.0"))
+                    logger.info("Migrated schema: Added column video_volume to posts table")
+                if "slideshow_duration" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN slideshow_duration INTEGER DEFAULT 10"))
+                    logger.info("Migrated schema: Added column slideshow_duration to posts table")
                 
                 # Check and add unique constraint
                 # uq_user_platform_external_post unique constraint
@@ -289,6 +301,7 @@ app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
 @app.post("/posts", response_model=PostResponse)
 async def create_post(post_data: PostCreate, user_id: str):
     import json
+    from services.post_orchestrator.media import process_and_mix_media
     
     media_key = post_data.media_key
     media_keys = post_data.media_keys
@@ -297,6 +310,23 @@ async def create_post(post_data: PostCreate, user_id: str):
     if not media_keys and media_key:
         media_keys = [media_key]
         
+    # Process & Mix Media (Slideshow & Audio Mixing)
+    compiled_result = await process_and_mix_media(
+        user_id=user_id,
+        media_keys=media_keys or [],
+        audio_key=post_data.audio_key,
+        is_reel=post_data.is_reel,
+        music_volume=post_data.music_volume or 0.2,
+        video_volume=post_data.video_volume or 1.0,
+        slideshow_duration=post_data.slideshow_duration or 10
+    )
+    
+    if compiled_result:
+        media_key = compiled_result["media_key"]
+        media_keys = compiled_result["media_keys"]
+        post_data.media_key = media_key
+        post_data.media_keys = media_keys
+
     # 1. Store in DB
     query = Post.insert().values(
         id=uuid.uuid4(),
@@ -306,6 +336,10 @@ async def create_post(post_data: PostCreate, user_id: str):
         is_reel=post_data.is_reel,
         status=PostStatus.PENDING.value,
         user_id=user_id,
+        audio_key=post_data.audio_key,
+        music_volume=post_data.music_volume,
+        video_volume=post_data.video_volume,
+        slideshow_duration=post_data.slideshow_duration,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     ).returning(Post)

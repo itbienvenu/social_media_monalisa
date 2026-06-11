@@ -71,6 +71,7 @@ async def handle_post_event(message: dict):
     post_id = message.get("post_id")
     content = message.get("content")
     media_url = message.get("media_url")
+    media_urls = message.get("media_urls", [])
     user_id = message.get("user_id")
     if not user_id:
         logger.error("User ID missing in message")
@@ -87,7 +88,7 @@ async def handle_post_event(message: dict):
     target = await database.fetch_one(query)
     
     if target:
-        await post_to_instagram(post_id, content, target['access_token'], target['target_id'], media_url)
+        await post_to_instagram(post_id, content, target['access_token'], target['target_id'], media_url, media_urls)
     else:
         logger.error(f"No credentials found for user {user_id}")
         await mq.publish("posts.instagram.failed", {"post_id": post_id, "reason": "no_credentials"})

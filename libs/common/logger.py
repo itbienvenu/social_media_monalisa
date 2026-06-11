@@ -2,7 +2,18 @@ import logging
 import sys
 import uuid
 import datetime
+import re
 from typing import Any
+
+def sanitize_error_message(message: str) -> str:
+    if not message:
+        return message
+    message = re.sub(r'access_token=[^&\s\'"]+', 'access_token=***', message)
+    message = re.sub(r'client_secret=[^&\s\'"]+', 'client_secret=***', message)
+    message = re.sub(r'code=[^&\s\'"]+', 'code=***', message)
+    message = re.sub(r'/uploads(/uploads)+', '/uploads', message)
+    message = re.sub(r'[Bb]earer\s+[^&\s\'"]+', 'Bearer ***', message)
+    return message
 
 def setup_logger(name: str):
     logger = logging.getLogger(name)
@@ -22,6 +33,7 @@ async def log_post_stage(database: Any, post_id: Any, platform: str, stage: str,
     Log a post lifecycle transition stage to the shared post_logs database table
     and also log it to the local system logger.
     """
+    message = sanitize_error_message(message)
     sys_logger = logging.getLogger(platform)
     log_msg = f"[POST_STAGE] Post: {post_id} | Stage: {stage} | Status: {status} | Message: {message or ''}"
     if status.upper() == "ERROR":

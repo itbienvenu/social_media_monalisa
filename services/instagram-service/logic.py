@@ -3,6 +3,7 @@ import logging
 import httpx
 import os
 from libs.common.messaging import MessageQueue
+from libs.common.logger import sanitize_error_message
 
 logger = logging.getLogger("instagram-service")
 mq = MessageQueue("instagram-service")
@@ -211,19 +212,116 @@ class InstagramClient:
             logger.error(f"Error deleting Instagram media {media_id}: {e}")
             raise e
 
+    async def post_carousel(self, media_urls: list, caption: str) -> dict:
+        """
+        Creates a Carousel post:
+        1. Create a container for each item in the carousel with is_carousel_item=True
+        2. Wait/Poll for any video containers to finish processing (if any of the items are videos)
+        3. Create a parent container of type CAROUSEL with children IDs
+        4. Publish the parent container
+        """
+        if "mock" in self.access_token:
+            logger.info(f"Mock publishing carousel with {len(media_urls)} items")
+            return {"id": "mock_ig_carousel_id"}
+
+        # Step 1: Create individual containers
+        children_ids = []
+        for media_url in media_urls:
+            container_url = f"{FACEBOOK_GRAPH_URL}/{self.instagram_account_id}/media"
+            lower_url = media_url.lower()
+            is_video = any(ext in lower_url for ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"])
+            
+            payload = {
+                "is_carousel_item": "true",
+                "access_token": self.access_token
+            }
+            if is_video:
+                payload["media_type"] = "VIDEO"
+                payload["video_url"] = media_url
+            else:
+                payload["image_url"] = media_url
+                
+            logger.info(f"Creating carousel item container for {media_url}...")
+            resp = await self.client.post(container_url, params=payload)
+            resp.raise_for_status()
+            container_id = resp.json().get("id")
+            children_ids.append(container_id)
+            
+            # Step 2: Poll status if it's a video
+            if is_video:
+                status_url = f"{FACEBOOK_GRAPH_URL}/{container_id}"
+                status_params = {
+                    "fields": "status_code",
+                    "access_token": self.access_token
+                }
+                
+                max_retries = 30
+                poll_interval = 5
+                
+                logger.info(f"Polling carousel item video container {container_id} status...")
+                for attempt in range(max_retries):
+                    await asyncio.sleep(poll_interval)
+                    status_resp = await self.client.get(status_url, params=status_params)
+                    status_resp.raise_for_status()
+                    status_data = status_resp.json()
+                    status_code = status_data.get("status_code")
+                    
+                    logger.info(f"Carousel item video {container_id} status_code: {status_code} (attempt {attempt + 1}/{max_retries})")
+                    
+                    if status_code == "FINISHED":
+                        break
+                    elif status_code == "ERROR":
+                        raise Exception("Instagram video processing failed on their server.")
+                    elif status_code == "EXPIRED":
+                        raise Exception("Instagram media container expired.")
+                else:
+                    raise Exception("Timed out waiting for Instagram video container processing.")
+
+        # Step 3: Create parent container
+        parent_url = f"{FACEBOOK_GRAPH_URL}/{self.instagram_account_id}/media"
+        parent_payload = {
+            "media_type": "CAROUSEL",
+            "children": ",".join(children_ids),
+            "caption": caption,
+            "access_token": self.access_token
+        }
+        
+        logger.info(f"Creating parent CAROUSEL container with children: {children_ids}...")
+        resp_parent = await self.client.post(parent_url, params=parent_payload)
+        resp_parent.raise_for_status()
+        parent_container_id = resp_parent.json().get("id")
+        
+        # Step 4: Publish parent container
+        publish_url = f"{FACEBOOK_GRAPH_URL}/{self.instagram_account_id}/media_publish"
+        pub_payload = {
+            "creation_id": parent_container_id,
+            "access_token": self.access_token
+        }
+        
+        logger.info(f"Publishing parent CAROUSEL container {parent_container_id}...")
+        resp_pub = await self.client.post(publish_url, params=pub_payload)
+        resp_pub.raise_for_status()
+        return resp_pub.json()
+
     async def close(self):
         await self.client.aclose()
 
 
-async def post_to_instagram(post_id: str, content: str, access_token: str, target_id: str, media_url: str):
-    if not media_url:
-        logger.error("Instagram requires media_url")
+async def post_to_instagram(post_id: str, content: str, access_token: str, target_id: str, media_url: str, media_urls: list = None):
+    # Determine the media source
+    urls = media_urls or ([media_url] if media_url else [])
+    if not urls:
+        logger.error("Instagram requires at least one media URL")
         await mq.publish("posts.instagram.failed", {"post_id": post_id, "reason": "missing_media"})
         return
 
     client = InstagramClient(access_token, target_id)
     try:
-        result = await client.post_media(media_url, content)
+        if len(urls) > 1:
+            result = await client.post_carousel(urls, content)
+        else:
+            result = await client.post_media(urls[0], content)
+            
         logger.info(f"Successfully posted {post_id} to Instagram: {result}")
         await mq.publish("posts.instagram.success", {
             "post_id": post_id, 
@@ -235,7 +333,7 @@ async def post_to_instagram(post_id: str, content: str, access_token: str, targe
         await mq.publish("posts.instagram.failed", {
             "post_id": post_id, 
             "status": "failed", 
-            "reason": str(e)
+            "reason": sanitize_error_message(str(e))
         })
     finally:
         await client.close()

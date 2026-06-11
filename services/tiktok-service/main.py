@@ -87,7 +87,8 @@ async def handle_post_event(message: dict):
     logger.info(f"Received post event: {message}")
     post_id = message.get("post_id")
     content = message.get("content")
-    media_url = message.get("media_url") # Required for TikTok
+    media_url = message.get("media_url")
+    media_urls = message.get("media_urls", [])
     user_id = message.get("user_id")
     if not user_id:
         logger.error("User ID missing in message")
@@ -98,7 +99,7 @@ async def handle_post_event(message: dict):
     cred = await database.fetch_one(query)
     
     if cred:
-        await post_to_tiktok(post_id, content, cred['access_token'], cred['open_id'], media_url)
+        await post_to_tiktok(post_id, content, cred['access_token'], cred['open_id'], media_url, media_urls)
     else:
         logger.error(f"No credentials found for user {user_id}")
         await mq.publish("posts.tiktok.failed", {"post_id": post_id, "reason": "no_credentials"})

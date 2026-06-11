@@ -1,5 +1,6 @@
 import boto3
 import os
+import subprocess
 from botocore.exceptions import ClientError
 import logging
 import re
@@ -16,7 +17,8 @@ def generate_upload_url(filename: str, user_id: str, content_type: str = "image/
     # Restrict allowed content-types
     ALLOWED_CONTENT_TYPES = {
         "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp",
-        "video/mp4", "video/mpeg", "video/quicktime", "video/webm"
+        "video/mp4", "video/mpeg", "video/quicktime", "video/webm",
+        "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/aac", "audio/m4a", "audio/x-m4a"
     }
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=400, detail="Content-Type not allowed")
@@ -176,3 +178,202 @@ def get_presigned_download_url(url: str, expires_in: int = 3600) -> str:
             logger.error(f"Failed to generate presigned GET URL for {url}: {e}")
             
     return url
+
+
+def is_image_file(filename: str) -> bool:
+    lower = filename.lower()
+    return any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"])
+
+
+def is_video_file(filename: str) -> bool:
+    lower = filename.lower()
+    return any(lower.endswith(ext) for ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"])
+
+
+def has_audio_stream(video_path: str) -> bool:
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=codec_type", "-of", "csv=p=0", video_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        return "audio" in result.stdout
+    except Exception:
+        return False
+
+
+async def process_and_mix_media(
+    user_id: str,
+    media_keys: list,
+    audio_key: str = None,
+    is_reel: bool = False,
+    music_volume: float = 0.2,
+    video_volume: float = 1.0,
+    slideshow_duration: int = 10
+) -> dict:
+    """
+    Downloads media and audio files, compiles them via FFmpeg if necessary:
+    1. If is_reel is true and there are multiple image media keys: compiles them to a video slideshow Reel.
+    2. If there is a video and a background audio track (audio_key): overlays/mixes the audio.
+    Uploads the output to S3/MinIO and returns the new keys/urls.
+    """
+    import subprocess
+    import tempfile
+    import shutil
+    
+    # Initialize S3 client
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=os.getenv("MINIO_ENDPOINT", "http://minio:9000"),
+        aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+        aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
+        config=boto3.session.Config(signature_version='s3v4')
+    )
+    bucket = os.getenv("MINIO_BUCKET_NAME", "social-media-uploads")
+    
+    # Helper function to extract MinIO Key from URL or key
+    def get_object_key(key_or_url: str) -> str:
+        if not key_or_url:
+            return ""
+        if str(key_or_url).startswith("http"):
+            parts = str(key_or_url).split(f"/uploads/{bucket}/")
+            if len(parts) > 1:
+                return parts[1].split("?")[0]
+            # Try uploads/ fallback
+            match = re.search(r'uploads/.*', str(key_or_url))
+            if match:
+                return match.group(0).split("?")[0]
+        return str(key_or_url).split("?")[0]
+
+    # Check inputs
+    valid_keys = [k for k in media_keys if k]
+    if not valid_keys:
+        return None
+        
+    # Determine file types
+    is_all_images = all(is_image_file(get_object_key(k)) for k in valid_keys)
+    is_single_video = len(valid_keys) == 1 and is_video_file(get_object_key(valid_keys[0]))
+    
+    needs_slideshow = is_reel and is_all_images and len(valid_keys) > 0
+    needs_audio_mix = audio_key and (needs_slideshow or is_single_video)
+    
+    if not needs_slideshow and not needs_audio_mix:
+        # No compilation required
+        return None
+        
+    # Create temp workspace
+    temp_dir = tempfile.mkdtemp()
+    try:
+        logger.info(f"Processing media in temp dir: {temp_dir}")
+        
+        # Download media files
+        local_media_paths = []
+        for idx, k in enumerate(valid_keys):
+            obj_key = get_object_key(k)
+            local_ext = os.path.splitext(obj_key)[1] or (".jpg" if is_all_images else ".mp4")
+            local_path = os.path.join(temp_dir, f"media_{idx}{local_ext}")
+            logger.info(f"Downloading {obj_key} to {local_path}")
+            s3_client.download_file(bucket, obj_key, local_path)
+            local_media_paths.append(local_path)
+            
+        # Download audio if provided
+        local_audio_path = None
+        if audio_key:
+            audio_obj_key = get_object_key(audio_key)
+            audio_ext = os.path.splitext(audio_obj_key)[1] or ".mp3"
+            local_audio_path = os.path.join(temp_dir, f"audio{audio_ext}")
+            logger.info(f"Downloading audio {audio_obj_key} to {local_audio_path}")
+            s3_client.download_file(bucket, audio_obj_key, local_audio_path)
+            
+        output_filename = f"compiled_{uuid.uuid4()}.mp4"
+        output_local_path = os.path.join(temp_dir, output_filename)
+        
+        if needs_slideshow:
+            logger.info("Compiling image slideshow...")
+            # Compile individual video clips for each image
+            duration_per_image = max(1.0, float(slideshow_duration) / len(local_media_paths))
+            clip_paths = []
+            
+            for idx, img_path in enumerate(local_media_paths):
+                clip_path = os.path.join(temp_dir, f"clip_{idx}.mp4")
+                # Scale, pad to 1080x1920 (standard vertical Reel format)
+                cmd = [
+                    "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+                    "-c:v", "libx264", "-t", str(duration_per_image),
+                    "-pix_fmt", "yuv420p", "-vf",
+                    "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                    clip_path
+                ]
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                clip_paths.append(clip_path)
+                
+            # Concatenate clips
+            list_file_path = os.path.join(temp_dir, "clips.txt")
+            with open(list_file_path, "w") as f:
+                for cp in clip_paths:
+                    f.write(f"file '{cp}'\n")
+                    
+            concat_no_audio = os.path.join(temp_dir, "concat_no_audio.mp4")
+            cmd_concat = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file_path,
+                "-c", "copy", concat_no_audio
+            ]
+            subprocess.run(cmd_concat, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Now overlay audio if available, otherwise output silent video
+            if local_audio_path:
+                cmd_audio = [
+                    "ffmpeg", "-y", "-i", concat_no_audio, "-stream_loop", "-1", "-i", local_audio_path,
+                    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
+                    "-shortest", output_local_path
+                ]
+                subprocess.run(cmd_audio, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            else:
+                shutil.copy(concat_no_audio, output_local_path)
+                
+        elif is_single_video and local_audio_path:
+            logger.info("Mixing background music into single video...")
+            video_path = local_media_paths[0]
+            
+            if has_audio_stream(video_path):
+                # Video has audio; mix the streams
+                cmd = [
+                    "ffmpeg", "-y", "-i", video_path, "-stream_loop", "-1", "-i", local_audio_path,
+                    "-filter_complex", f"[0:a]volume={video_volume}[a0];[1:a]volume={music_volume}[a1];[a0][a1]amix=inputs=2:duration=first[a]",
+                    "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", output_local_path
+                ]
+            else:
+                # Video has no audio; attach background audio directly
+                cmd = [
+                    "ffmpeg", "-y", "-i", video_path, "-stream_loop", "-1", "-i", local_audio_path,
+                    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", output_local_path
+                ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+        # Upload compiled video to MinIO
+        new_object_key = f"uploads/{user_id}/{output_filename}"
+        logger.info(f"Uploading compiled media to {new_object_key}")
+        s3_client.upload_file(
+            output_local_path, bucket, new_object_key,
+            ExtraArgs={'ContentType': 'video/mp4'}
+        )
+        
+        # Construct public URL
+        base_url = os.getenv("BASE_URL", "http://localhost:8000")
+        if base_url.endswith("/"):
+            base_url = base_url[:-1]
+        new_public_url = f"{base_url}/uploads/{bucket}/{new_object_key}"
+        
+        return {
+            "media_key": new_object_key,
+            "media_keys": [new_object_key],
+            "media_url": new_public_url,
+            "media_urls": [new_public_url]
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed compile or mix media: {e}")
+        # Return None so we gracefully fallback to original media
+        return None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

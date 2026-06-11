@@ -7,7 +7,7 @@ mq = MessageQueue("post-orchestrator")
 import os
 
 S3_ENDPOINT = os.getenv("MINIO_ENDPOINT_URL", "http://minio:9000")
-S3_BUCKET = os.getenv("S3_BUCKET_NAME", "social-media-content")
+S3_BUCKET = os.getenv("MINIO_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME") or "uploads"
 
 async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: str, media_key: str = None, user_id: str = "anonymous", media_keys: list = None, is_reel: bool = False, facebook_page_id: str = None):
     # Construct media_url if key exists
