@@ -27,7 +27,7 @@ async def create_post(
                 f"{POST_ORCHESTRATOR_URL}/posts",
                 json=post.model_dump(),
                 params={"user_id": user_id},
-                timeout=5.0
+                timeout=30.0
             )
             response.raise_for_status()
             return response.json()
@@ -151,7 +151,7 @@ async def logout(response: Response):
             )
             resp.raise_for_status()
             res = JSONResponse(content=resp.json())
-            for cookie in resp.headers.getlist("set-cookie"):
+            for cookie in resp.headers.get_list("set-cookie"):
                 res.headers.append("set-cookie", cookie)
             return res
         except httpx.RequestError as exc:
@@ -245,7 +245,7 @@ async def register_proxy(request: Request):
             body = await request.json()
             resp = await client.post(f"{AUTH_SERVICE_URL}/register", json=body)
             res = JSONResponse(status_code=resp.status_code, content=resp.json())
-            for cookie in resp.headers.getlist("set-cookie"):
+            for cookie in resp.headers.get_list("set-cookie"):
                 res.headers.append("set-cookie", cookie)
             return res
         except httpx.HTTPError as e:
@@ -258,7 +258,7 @@ async def login_proxy(request: Request, response: Response):
             body = await request.json()
             resp = await client.post(f"{AUTH_SERVICE_URL}/login", json=body)
             res = JSONResponse(status_code=resp.status_code, content=resp.json())
-            for cookie in resp.headers.getlist("set-cookie"):
+            for cookie in resp.headers.get_list("set-cookie"):
                 res.headers.append("set-cookie", cookie)
             return res
         except httpx.HTTPError as e:
@@ -277,7 +277,7 @@ async def refresh_proxy(request: Request, response: Response):
 
             resp = await client.post(f"{AUTH_SERVICE_URL}/refresh", json=body, headers=headers)
             res = JSONResponse(status_code=resp.status_code, content=resp.json())
-            for cookie in resp.headers.getlist("set-cookie"):
+            for cookie in resp.headers.get_list("set-cookie"):
                 res.headers.append("set-cookie", cookie)
             return res
         except httpx.HTTPError as e:
@@ -291,10 +291,10 @@ async def get_google_auth_url(response: Response):
             resp.raise_for_status()
             
             # Forward Set-Cookie headers (which contains the oauth_state cookie)
-            for cookie in resp.headers.getlist("set-cookie"):
-                response.headers.append("set-cookie", cookie)
-                
-            return resp.json()
+            json_resp = JSONResponse(content=resp.json())
+            for cookie in resp.headers.get_list("set-cookie"):
+                json_resp.headers.append("set-cookie", cookie)
+            return json_resp
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
         except httpx.HTTPError as e:
@@ -302,6 +302,11 @@ async def get_google_auth_url(response: Response):
 
 @router.get("/auth/google/callback")
 async def google_callback(code: str, state: str, request: Request, response: Response):
+    host = request.headers.get("host", "")
+    if "localhost" not in host and "127.0.0.1" not in host:
+        local_url = str(request.url).replace(f"https://{host}", "http://localhost:8000").replace(f"http://{host}", "http://localhost:8000")
+        return RedirectResponse(url=local_url)
+
     async with httpx.AsyncClient() as client:
         try:
             # Forward the incoming cookies (which contain oauth_state)
@@ -317,14 +322,17 @@ async def google_callback(code: str, state: str, request: Request, response: Res
                 follow_redirects=False
             )
             
-            # Forward any cookies set by auth-service (like access_token, refresh_token, or deleting oauth_state)
-            for cookie in resp.headers.getlist("set-cookie"):
-                response.headers.append("set-cookie", cookie)
-
             if resp.status_code in (301, 302, 307, 308):
-                return RedirectResponse(url=resp.headers["location"], status_code=resp.status_code)
+                redirect_resp = RedirectResponse(url=resp.headers["location"], status_code=resp.status_code)
+                for cookie in resp.headers.get_list("set-cookie"):
+                    redirect_resp.headers.append("set-cookie", cookie)
+                return redirect_resp
+
             resp.raise_for_status()
-            return resp.json()
+            json_resp = JSONResponse(content=resp.json())
+            for cookie in resp.headers.get_list("set-cookie"):
+                json_resp.headers.append("set-cookie", cookie)
+            return json_resp
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
         except httpx.HTTPError as e:
@@ -553,10 +561,16 @@ async def platform_callback(platform: str, code: str, state: str):
              response = await client.get(target_url, params={"code": code, "state": state}, timeout=30.0, follow_redirects=False)
              
              if response.status_code in (301, 302, 307, 308):
-                 return RedirectResponse(url=response.headers["location"], status_code=response.status_code)
+                 redirect_resp = RedirectResponse(url=response.headers["location"], status_code=response.status_code)
+                 for cookie in response.headers.get_list("set-cookie"):
+                     redirect_resp.headers.append("set-cookie", cookie)
+                 return redirect_resp
                  
              response.raise_for_status()
-             return response.json()
+             json_resp = JSONResponse(content=response.json())
+             for cookie in response.headers.get_list("set-cookie"):
+                 json_resp.headers.append("set-cookie", cookie)
+             return json_resp
         except httpx.RequestError as exc:
              raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
 

@@ -22,6 +22,7 @@ export default function PostPage() {
     const [videoLocalUrl, setVideoLocalUrl] = useState<string>('');
     const [audioLocalUrl, setAudioLocalUrl] = useState<string>('');
     const [imageLocalUrls, setImageLocalUrls] = useState<string[]>([]);
+    const [filePreviews, setFilePreviews] = useState<Record<string, string>>({});
     
     // Playback sync refs and states
     const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -56,6 +57,20 @@ export default function PostPage() {
         };
         fetchConnections();
     }, [API_URL]);
+
+    // Manage object URLs for filePreviews
+    useEffect(() => {
+        const previewsMap: Record<string, string> = {};
+        selectedFiles.forEach(file => {
+            const key = `${file.name}-${file.size}`;
+            previewsMap[key] = URL.createObjectURL(file);
+        });
+        setFilePreviews(previewsMap);
+
+        return () => {
+            Object.values(previewsMap).forEach(url => URL.revokeObjectURL(url));
+        };
+    }, [selectedFiles]);
 
     // Sync local object URLs for preview files
     useEffect(() => {
@@ -181,6 +196,32 @@ export default function PostPage() {
             setSelectedFiles(Array.from(e.target.files));
             setMediaUrl(''); // Reset manual URL if files selected
         }
+    };
+
+    const moveFileUp = (index: number) => {
+        if (index === 0) return;
+        setSelectedFiles(prev => {
+            const next = [...prev];
+            const temp = next[index];
+            next[index] = next[index - 1];
+            next[index - 1] = temp;
+            return next;
+        });
+    };
+
+    const moveFileDown = (index: number) => {
+        setSelectedFiles(prev => {
+            if (index >= prev.length - 1) return prev;
+            const next = [...prev];
+            const temp = next[index];
+            next[index] = next[index + 1];
+            next[index + 1] = temp;
+            return next;
+        });
+    };
+
+    const removeFile = (index: number) => {
+        setSelectedFiles(prev => prev.filter((_, i) => i !== index));
     };
 
     const uploadFile = async (file: File) => {
@@ -386,13 +427,84 @@ export default function PostPage() {
                                     className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
                                 />
                                 {selectedFiles.length > 0 && (
-                                    <div className="mt-2 text-sm text-green-600 text-left">
-                                        <p className="font-semibold">{selectedFiles.length} file(s) selected:</p>
-                                        <ul className="list-disc list-inside text-xs mt-1">
-                                            {selectedFiles.map((f, i) => (
-                                                <li key={i}>{f.name}</li>
-                                            ))}
-                                        </ul>
+                                    <div className="mt-4 text-left border-t border-gray-100 pt-4">
+                                        <p className="text-sm font-semibold text-gray-700 mb-3 flex items-center">
+                                            <span>Selected Media Order ({selectedFiles.length})</span>
+                                            <span className="ml-2 text-xs font-normal text-gray-500">(Use arrows to change sequence on platform)</span>
+                                        </p>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                                            {selectedFiles.map((file, index) => {
+                                                const key = `${file.name}-${file.size}`;
+                                                const previewUrl = filePreviews[key];
+                                                const isImage = file.type.startsWith('image/');
+                                                
+                                                return (
+                                                    <div key={key} className="relative group border border-gray-200 rounded-lg p-2 bg-gray-50 flex flex-col justify-between">
+                                                        {/* Media Preview */}
+                                                        <div className="w-full h-24 bg-black rounded overflow-hidden flex items-center justify-center relative">
+                                                            {isImage && previewUrl ? (
+                                                                <img 
+                                                                    src={previewUrl} 
+                                                                    alt={file.name} 
+                                                                    className="w-full h-full object-cover"
+                                                                />
+                                                            ) : (
+                                                                <div className="w-full h-full flex flex-col items-center justify-center text-white p-1 text-center bg-slate-800">
+                                                                    <span className="text-2xl">🎥</span>
+                                                                    <span className="text-[10px] truncate max-w-full mt-1 px-1">{file.name}</span>
+                                                                </div>
+                                                            )}
+                                                            {/* Sequence Number Badge */}
+                                                            <div className="absolute top-1 left-1 bg-blue-600 text-white text-xs font-bold w-5 h-5 rounded-full flex items-center justify-center shadow">
+                                                                {index + 1}
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        {/* File Details */}
+                                                        <div className="w-full mt-2">
+                                                            <p className="text-[11px] font-medium text-gray-700 truncate" title={file.name}>
+                                                                {file.name}
+                                                            </p>
+                                                            <p className="text-[9px] text-gray-400">
+                                                                {(file.size / 1024 / 1024).toFixed(2)} MB
+                                                            </p>
+                                                        </div>
+                                                        
+                                                        {/* Actions / Reordering Controls */}
+                                                        <div className="flex items-center justify-between w-full mt-2 pt-2 border-t border-gray-100">
+                                                            <div className="flex space-x-1">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => moveFileUp(index)}
+                                                                    disabled={index === 0}
+                                                                    className="px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 hover:bg-gray-300 disabled:opacity-30 disabled:hover:bg-gray-200 text-xs transition"
+                                                                    title="Move Left"
+                                                                >
+                                                                    ←
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => moveFileDown(index)}
+                                                                    disabled={index === selectedFiles.length - 1}
+                                                                    className="px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 hover:bg-gray-300 disabled:opacity-30 disabled:hover:bg-gray-200 text-xs transition"
+                                                                    title="Move Right"
+                                                                >
+                                                                    →
+                                                                </button>
+                                                            </div>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => removeFile(index)}
+                                                                className="px-1.5 py-0.5 rounded bg-red-50 text-red-600 hover:bg-red-100 transition text-xs font-semibold"
+                                                                title="Remove file"
+                                                            >
+                                                                Remove
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
                                     </div>
                                 )}
                             </div>

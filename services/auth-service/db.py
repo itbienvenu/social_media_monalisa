@@ -21,6 +21,8 @@ DATABASE_URL = os.getenv(
 database = databases.Database(DATABASE_URL)
 metadata = sqlalchemy.MetaData()
 
+import datetime
+
 users = sqlalchemy.Table(
     "users",
     metadata,
@@ -28,4 +30,11 @@ users = sqlalchemy.Table(
     sqlalchemy.Column("email", sqlalchemy.String, unique=True, index=True),
     sqlalchemy.Column("hashed_password", sqlalchemy.String),
     sqlalchemy.Column("is_active", sqlalchemy.Boolean, default=True),
+)
+
+oauth_states = sqlalchemy.Table(
+    "oauth_states",
+    metadata,
+    sqlalchemy.Column("state", sqlalchemy.String, primary_key=True),
+    sqlalchemy.Column("created_at", sqlalchemy.DateTime, default=datetime.datetime.utcnow),
 )
