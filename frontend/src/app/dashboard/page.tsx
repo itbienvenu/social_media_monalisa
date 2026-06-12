@@ -50,20 +50,8 @@ function DashboardContent() {
     const [editLoading, setEditLoading] = useState(false);
 
     useEffect(() => {
-        const token = localStorage.getItem('token');
-        if (!token) {
-            router.push('/login');
-            return;
-        }
-
-        const payload = decodeJwt(token);
-        if (!payload || !payload.sub) {
-            console.error("Invalid or unparseable token, redirecting to login");
-            localStorage.removeItem('token');
-            router.push('/login');
-            return;
-        }
-
+        // Authentication is now handled via HttpOnly cookies
+        // No need to check localStorage for token
         const fetchData = async () => {
             try {
                 const [connRes, postsRes, notifRes] = await Promise.all([
@@ -114,13 +102,11 @@ function DashboardContent() {
         };
 
         fetchData();
-    }, [router]);
+    }, []);
 
     // Poll for notifications and posts updates every 8 seconds
     useEffect(() => {
-        const token = localStorage.getItem('token');
-        if (!token) return;
-
+        // Authentication is now handled via HttpOnly cookies
         const interval = setInterval(async () => {
             try {
                 const [postsRes, notifRes] = await Promise.all([
@@ -417,7 +403,16 @@ function DashboardContent() {
                             )}
                         </div>
 
-                        <button onClick={() => { localStorage.removeItem('token'); router.push('/login'); }} className="bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 px-3.5 py-1.5 rounded-lg text-sm font-semibold transition">Logout</button>
+                        <button onClick={async () => {
+                            try {
+                                await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/logout`, {
+                                    method: 'POST'
+                                });
+                            } catch (e) {
+                                console.error('Logout error:', e);
+                            }
+                            router.push('/login');
+                        }} className="bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 px-3.5 py-1.5 rounded-lg text-sm font-semibold transition">Logout</button>
                     </div>
                 </div>
 

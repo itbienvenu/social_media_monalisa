@@ -130,10 +130,17 @@ class InstagramClient:
                 logger.info(f"Polling Instagram container {container_id} status...")
                 for attempt in range(max_retries):
                     await asyncio.sleep(poll_interval)
-                    status_resp = await self.client.get(status_url, params=status_params)
-                    status_resp.raise_for_status()
-                    status_data = status_resp.json()
-                    status_code = status_data.get("status_code")
+                    try:
+                        status_resp = await self.client.get(status_url, params=status_params)
+                        status_resp.raise_for_status()
+                        status_data = status_resp.json()
+                        status_code = status_data.get("status_code")
+                    except httpx.HTTPError as exc:
+                        logger.warning(f"HTTP error polling container {container_id} status (attempt {attempt + 1}/{max_retries}): {exc}. Retrying...")
+                        continue
+                    except Exception as exc:
+                        logger.warning(f"Unexpected error polling container {container_id} status (attempt {attempt + 1}/{max_retries}): {exc}. Retrying...")
+                        continue
                     
                     logger.info(f"Instagram container {container_id} status_code: {status_code} (attempt {attempt + 1}/{max_retries})")
                     
@@ -261,10 +268,17 @@ class InstagramClient:
                 logger.info(f"Polling carousel item video container {container_id} status...")
                 for attempt in range(max_retries):
                     await asyncio.sleep(poll_interval)
-                    status_resp = await self.client.get(status_url, params=status_params)
-                    status_resp.raise_for_status()
-                    status_data = status_resp.json()
-                    status_code = status_data.get("status_code")
+                    try:
+                        status_resp = await self.client.get(status_url, params=status_params)
+                        status_resp.raise_for_status()
+                        status_data = status_resp.json()
+                        status_code = status_data.get("status_code")
+                    except httpx.HTTPError as exc:
+                        logger.warning(f"HTTP error polling carousel item video container {container_id} status (attempt {attempt + 1}/{max_retries}): {exc}. Retrying...")
+                        continue
+                    except Exception as exc:
+                        logger.warning(f"Unexpected error polling carousel item video container {container_id} status (attempt {attempt + 1}/{max_retries}): {exc}. Retrying...")
+                        continue
                     
                     logger.info(f"Carousel item video {container_id} status_code: {status_code} (attempt {attempt + 1}/{max_retries})")
                     

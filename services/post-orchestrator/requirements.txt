@@ -8,3 +8,5 @@ aio-pika
 aioboto3
 boto3
 httpx
+arq
+redis

@@ -42,6 +42,8 @@ Post = Table(
     # New columns for historical sync
     Column("external_id", String, nullable=True, index=True),
     Column("platform", String, nullable=True),
+    # New column for background job tracking
+    Column("job_id", String, nullable=True, index=True),
     UniqueConstraint("user_id", "platform", "external_id", name="uq_user_platform_external_post"),
 )
 

@@ -6,6 +6,7 @@ import logging
 import re
 import uuid
 from fastapi import HTTPException
+from libs.common.signatures import sign_url_path
 
 logger = logging.getLogger("post-orchestrator")
 
@@ -79,15 +80,12 @@ def generate_upload_url(filename: str, user_id: str, content_type: str = "image/
             ExpiresIn=3600
         )
         
-        # The public URL (what we send to Facebook/TikTok)
-        # We now use the BASE_URL (API Gateway) + /uploads route
         base_url = os.getenv("BASE_URL", "http://localhost:8000")
-        
-        # Strip trailing slash if present
         if base_url.endswith("/"):
             base_url = base_url[:-1]
             
-        public_url = f"{base_url}/uploads/{bucket}/{object_key}"
+        exp, sig = sign_url_path(bucket, object_key)
+        public_url = f"{base_url}/uploads/{bucket}/{object_key}?exp={exp}&sig={sig}"
         
         return {"upload_url": presigned_url, "public_url": public_url, "key": object_key}
         
@@ -190,19 +188,21 @@ def is_video_file(filename: str) -> bool:
     return any(lower.endswith(ext) for ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"])
 
 
+import asyncio
+
 def has_audio_stream(video_path: str) -> bool:
     try:
         cmd = [
             "ffprobe", "-v", "error", "-select_streams", "a",
             "-show_entries", "stream=codec_type", "-of", "csv=p=0", video_path
         ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True, timeout=10)
         return "audio" in result.stdout
     except Exception:
         return False
 
 
-async def process_and_mix_media(
+def _process_and_mix_media_sync(
     user_id: str,
     media_keys: list,
     audio_key: str = None,
@@ -212,10 +212,8 @@ async def process_and_mix_media(
     slideshow_duration: int = 10
 ) -> dict:
     """
-    Downloads media and audio files, compiles them via FFmpeg if necessary:
-    1. If is_reel is true and there are multiple image media keys: compiles them to a video slideshow Reel.
-    2. If there is a video and a background audio track (audio_key): overlays/mixes the audio.
-    Uploads the output to S3/MinIO and returns the new keys/urls.
+    Synchronous implementation of media compilation and mixing.
+    Runs in a separate thread.
     """
     import subprocess
     import tempfile
@@ -245,11 +243,14 @@ async def process_and_mix_media(
                 return match.group(0).split("?")[0]
         return str(key_or_url).split("?")[0]
 
-    # Check inputs
-    valid_keys = [k for k in media_keys if k]
+    # Enforce upper bound on images/clips count (max 20)
+    valid_keys = [k for k in media_keys if k][:20]
     if not valid_keys:
         return None
         
+    # Enforce bounds on slideshow duration (max 60 seconds)
+    slideshow_duration = min(60, max(1, slideshow_duration))
+    
     # Determine file types
     is_all_images = all(is_image_file(get_object_key(k)) for k in valid_keys)
     is_single_video = len(valid_keys) == 1 and is_video_file(get_object_key(valid_keys[0]))
@@ -260,6 +261,26 @@ async def process_and_mix_media(
     if not needs_slideshow and not needs_audio_mix:
         # No compilation required
         return None
+
+    # Enforce upper bound on file sizes (max 100MB per file)
+    MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
+    for k in valid_keys:
+        obj_key = get_object_key(k)
+        try:
+            head = s3_client.head_object(Bucket=bucket, Key=obj_key)
+            if head.get('ContentLength', 0) > MAX_FILE_SIZE_BYTES:
+                raise ValueError(f"File {obj_key} size exceeds the 100MB limit.")
+        except ClientError as e:
+            logger.error(f"S3 head object error for validation of {obj_key}: {e}")
+
+    if audio_key:
+        audio_obj_key = get_object_key(audio_key)
+        try:
+            head = s3_client.head_object(Bucket=bucket, Key=audio_obj_key)
+            if head.get('ContentLength', 0) > MAX_FILE_SIZE_BYTES:
+                raise ValueError(f"Audio file {audio_obj_key} size exceeds the 100MB limit.")
+        except ClientError as e:
+            logger.error(f"S3 head object error for validation of {audio_obj_key}: {e}")
         
     # Create temp workspace
     temp_dir = tempfile.mkdtemp()
@@ -288,6 +309,9 @@ async def process_and_mix_media(
         output_filename = f"compiled_{uuid.uuid4()}.mp4"
         output_local_path = os.path.join(temp_dir, output_filename)
         
+        # Enforce FFmpeg execution timeout (60 seconds)
+        FFMPEG_TIMEOUT_SECONDS = 60
+        
         if needs_slideshow:
             logger.info("Compiling image slideshow...")
             # Compile individual video clips for each image
@@ -304,7 +328,7 @@ async def process_and_mix_media(
                     "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",
                     clip_path
                 ]
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=FFMPEG_TIMEOUT_SECONDS)
                 clip_paths.append(clip_path)
                 
             # Concatenate clips
@@ -318,16 +342,17 @@ async def process_and_mix_media(
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file_path,
                 "-c", "copy", concat_no_audio
             ]
-            subprocess.run(cmd_concat, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(cmd_concat, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=FFMPEG_TIMEOUT_SECONDS)
             
             # Now overlay audio if available, otherwise output silent video
             if local_audio_path:
                 cmd_audio = [
                     "ffmpeg", "-y", "-i", concat_no_audio, "-stream_loop", "-1", "-i", local_audio_path,
-                    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
+                    "-filter_complex", f"[1:a]volume={music_volume}[a]",
+                    "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
                     "-shortest", output_local_path
                 ]
-                subprocess.run(cmd_audio, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run(cmd_audio, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=FFMPEG_TIMEOUT_SECONDS)
             else:
                 shutil.copy(concat_no_audio, output_local_path)
                 
@@ -348,7 +373,7 @@ async def process_and_mix_media(
                     "ffmpeg", "-y", "-i", video_path, "-stream_loop", "-1", "-i", local_audio_path,
                     "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", output_local_path
                 ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=FFMPEG_TIMEOUT_SECONDS)
             
         # Upload compiled video to MinIO
         new_object_key = f"uploads/{user_id}/{output_filename}"
@@ -362,7 +387,9 @@ async def process_and_mix_media(
         base_url = os.getenv("BASE_URL", "http://localhost:8000")
         if base_url.endswith("/"):
             base_url = base_url[:-1]
-        new_public_url = f"{base_url}/uploads/{bucket}/{new_object_key}"
+        
+        exp, sig = sign_url_path(bucket, new_object_key)
+        new_public_url = f"{base_url}/uploads/{bucket}/{new_object_key}?exp={exp}&sig={sig}"
         
         return {
             "media_key": new_object_key,
@@ -377,3 +404,30 @@ async def process_and_mix_media(
         return None
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def process_and_mix_media(
+    user_id: str,
+    media_keys: list,
+    audio_key: str = None,
+    is_reel: bool = False,
+    music_volume: float = 0.2,
+    video_volume: float = 1.0,
+    slideshow_duration: int = 10
+) -> dict:
+    """
+    Async wrapper that offloads the blocking media compilation to a background executor.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: _process_and_mix_media_sync(
+            user_id=user_id,
+            media_keys=media_keys,
+            audio_key=audio_key,
+            is_reel=is_reel,
+            music_volume=music_volume,
+            video_volume=video_volume,
+            slideshow_duration=slideshow_duration
+        )
+    )

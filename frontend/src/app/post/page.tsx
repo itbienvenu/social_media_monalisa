@@ -281,14 +281,67 @@ export default function PostPage() {
 
             if (res.ok) {
                 setUploadProgress(100);
-                setMessage(`Success! Post ID: ${data.id}`);
-                setContent('');
-                setPlatforms([]);
-                setSelectedFiles([]);
-                setMediaUrl('');
-                setTimeout(() => {
-                    window.location.href = '/dashboard';
-                }, 1500);
+                
+                // Check if post is being processed in background
+                if (data.status === 'processing' && data.job_id) {
+                    setMessage(`Processing media... This may take a moment.`);
+                    
+                    // Poll for job completion
+                    const pollJobStatus = async (jobId: string, attempts = 0) => {
+                        if (attempts >= 60) { // Max 5 minutes (60 * 5 seconds)
+                            setMessage(`Processing taking longer than expected. Post ID: ${data.id}`);
+                            setTimeout(() => {
+                                window.location.href = '/dashboard';
+                            }, 2000);
+                            return;
+                        }
+                        
+                        try {
+                            const jobRes = await apiFetch(`${API_URL}/jobs/${jobId}`);
+                            if (jobRes.ok) {
+                                const jobData = await jobRes.json();
+                                if (jobData.status === 'completed' || jobData.status === 'failed') {
+                                    setMessage(`Success! Post ID: ${data.id}`);
+                                    setContent('');
+                                    setPlatforms([]);
+                                    setSelectedFiles([]);
+                                    setMediaUrl('');
+                                    setTimeout(() => {
+                                        window.location.href = '/dashboard';
+                                    }, 1500);
+                                } else {
+                                    // Still processing, poll again in 5 seconds
+                                    setTimeout(() => pollJobStatus(jobId, attempts + 1), 5000);
+                                }
+                            } else {
+                                // Job endpoint failed, redirect anyway
+                                setMessage(`Success! Post ID: ${data.id}`);
+                                setTimeout(() => {
+                                    window.location.href = '/dashboard';
+                                }, 1500);
+                            }
+                        } catch (e) {
+                            console.error('Error polling job status:', e);
+                            // On error, redirect anyway
+                            setMessage(`Success! Post ID: ${data.id}`);
+                            setTimeout(() => {
+                                window.location.href = '/dashboard';
+                            }, 1500);
+                        }
+                    };
+                    
+                    pollJobStatus(data.job_id);
+                } else {
+                    // No background processing needed
+                    setMessage(`Success! Post ID: ${data.id}`);
+                    setContent('');
+                    setPlatforms([]);
+                    setSelectedFiles([]);
+                    setMediaUrl('');
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 1500);
+                }
             } else {
                 setMessage(`Error: ${data.detail || 'Failed to post'}`);
             }

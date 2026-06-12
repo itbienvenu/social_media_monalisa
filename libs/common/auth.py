@@ -1,21 +1,26 @@
 from typing import Optional
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, status, Cookie
 import logging
 
 logger = logging.getLogger("auth")
 
-async def verify_token(authorization: Optional[str] = Header(None)) -> dict:
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Missing Authorization Header"
-        )
+async def verify_token(
+    authorization: Optional[str] = Header(None),
+    access_token: Optional[str] = Cookie(None)
+) -> dict:
+    # First try to get token from HttpOnly cookie
+    token = access_token
     
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer":
+    # Fall back to Authorization header if cookie not present
+    if not token and authorization:
+        scheme, _, header_token = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            token = header_token
+    
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Invalid Authorization Scheme"
+            detail="Missing authentication credentials"
         )
 
     # Real JWT Verification

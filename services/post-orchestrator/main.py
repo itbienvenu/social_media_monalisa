@@ -12,6 +12,9 @@ import json
 import logging
 from libs.common.db import connect_db_with_retry
 from libs.common.logger import log_post_stage
+from arq import create_pool
+from arq.connections import RedisSettings
+import os
 
 import re
 
@@ -198,6 +201,14 @@ async def handle_post_failed(data: dict, platform: str):
 async def lifespan(app: FastAPI):
     await connect_db_with_retry(database)
     
+    # Initialize ARQ pool for background tasks
+    redis_pool = await create_pool(RedisSettings(
+        host=os.getenv('REDIS_HOST', 'redis'),
+        port=int(os.getenv('REDIS_PORT', 6379)),
+        database=int(os.getenv('REDIS_DB', 0)),
+    ))
+    app.state.arq_pool = redis_pool
+    
     # Create tables (for simplicity in this monorepo setup)
     engine = sqlalchemy.create_engine(str(database.url))
     try:
@@ -235,6 +246,9 @@ async def lifespan(app: FastAPI):
                 if "slideshow_duration" not in columns:
                     conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN slideshow_duration INTEGER DEFAULT 10"))
                     logger.info("Migrated schema: Added column slideshow_duration to posts table")
+                if "job_id" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN job_id VARCHAR"))
+                    logger.info("Migrated schema: Added column job_id to posts table")
                 
                 # Check and add unique constraint
                 # uq_user_platform_external_post unique constraint
@@ -294,6 +308,10 @@ async def lifespan(app: FastAPI):
         await mq.disconnect()
     except Exception:
         pass
+    try:
+        await app.state.arq_pool.close()
+    except Exception:
+        pass
     await database.disconnect()
 
 app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
@@ -310,22 +328,97 @@ async def create_post(post_data: PostCreate, user_id: str):
     if not media_keys and media_key:
         media_keys = [media_key]
         
-    # Process & Mix Media (Slideshow & Audio Mixing)
-    compiled_result = await process_and_mix_media(
-        user_id=user_id,
-        media_keys=media_keys or [],
-        audio_key=post_data.audio_key,
-        is_reel=post_data.is_reel,
-        music_volume=post_data.music_volume or 0.2,
-        video_volume=post_data.video_volume or 1.0,
-        slideshow_duration=post_data.slideshow_duration or 10
-    )
+    # Check if FFmpeg processing is needed
+    needs_processing = False
+    if media_keys:
+        from services.post_orchestrator.media import is_image_file, is_video_file
+        is_all_images = all(is_image_file(k) for k in media_keys)
+        is_single_video = len(media_keys) == 1 and is_video_file(media_keys[0])
+        needs_slideshow = post_data.is_reel and is_all_images and len(media_keys) > 0
+        needs_audio_mix = post_data.audio_key and (needs_slideshow or is_single_video)
+        needs_processing = needs_slideshow or needs_audio_mix
     
-    if compiled_result:
-        media_key = compiled_result["media_key"]
-        media_keys = compiled_result["media_keys"]
-        post_data.media_key = media_key
-        post_data.media_keys = media_keys
+    job_id = str(uuid.uuid4())
+    
+    if needs_processing:
+        # Enqueue background task for FFmpeg processing
+        logger.info(f"Enqueueing background media processing job {job_id}")
+        await app.state.arq_pool.enqueue_job(
+            'process_media_task',
+            job_id=job_id,
+            user_id=user_id,
+            media_keys=media_keys or [],
+            audio_key=post_data.audio_key,
+            is_reel=post_data.is_reel,
+            music_volume=post_data.music_volume or 0.2,
+            video_volume=post_data.video_volume or 1.0,
+            slideshow_duration=post_data.slideshow_duration or 10
+        )
+        
+        # Create post with "processing" status and job_id
+        query = Post.insert().values(
+            id=uuid.uuid4(),
+            content=post_data.content,
+            media_key=media_key,
+            media_keys=json.dumps(media_keys) if media_keys else None,
+            is_reel=post_data.is_reel,
+            status=PostStatus.PROCESSING.value,
+            user_id=user_id,
+            audio_key=post_data.audio_key,
+            music_volume=post_data.music_volume,
+            video_volume=post_data.video_volume,
+            slideshow_duration=post_data.slideshow_duration,
+            job_id=job_id,  # Store job_id for tracking
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        ).returning(Post)
+        
+        post = await database.fetch_one(query)
+        
+        await log_post_stage(
+            database, post['id'], "orchestrator", "post_created", "INFO",
+            f"Post created with background processing job {job_id}. Targets: {[p.value if hasattr(p, 'value') else str(p) for p in post_data.platforms]}"
+        )
+        
+        # Store Metadata (Targets)
+        for platform in post_data.platforms:
+            target_query = PostTarget.insert().values(
+                id=uuid.uuid4(),
+                post_id=post['id'],
+                platform=platform.value if hasattr(platform, "value") else str(platform),
+                status="pending"
+            )
+            await database.execute(target_query)
+            
+        # Return post with processing status (media will be updated when job completes)
+        return PostResponse(
+            id=post['id'],
+            content=post['content'],
+            media_key=get_presigned_download_url(post['media_key']),
+            media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
+            platforms=post_data.platforms,
+            is_reel=post['is_reel'],
+            status=PostStatus(post['status']),
+            created_at=post['created_at'],
+            updated_at=post['updated_at']
+        )
+    else:
+        # No processing needed, proceed as before
+        compiled_result = await process_and_mix_media(
+            user_id=user_id,
+            media_keys=media_keys or [],
+            audio_key=post_data.audio_key,
+            is_reel=post_data.is_reel,
+            music_volume=post_data.music_volume or 0.2,
+            video_volume=post_data.video_volume or 1.0,
+            slideshow_duration=post_data.slideshow_duration or 10
+        )
+        
+        if compiled_result:
+            media_key = compiled_result["media_key"]
+            media_keys = compiled_result["media_keys"]
+            post_data.media_key = media_key
+            post_data.media_keys = media_keys
 
     # 1. Store in DB
     query = Post.insert().values(
@@ -672,6 +765,23 @@ async def list_posts(user_id: str):
             updated_at=p['updated_at']
         ))
     return results
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """Get the status of a background media processing job."""
+    import redis.asyncio as redis
+    
+    redis_client = await redis.from_url(
+        f"redis://{os.getenv('REDIS_HOST', 'redis')}:{os.getenv('REDIS_PORT', 6379)}/{os.getenv('REDIS_DB', 0)}"
+    )
+    
+    job_data = await redis_client.get(f"job:{job_id}")
+    await redis_client.close()
+    
+    if not job_data:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    
+    return json.loads(job_data)
 
 @app.post("/media/upload-url")
 async def get_upload_url(filename: str, user_id: str, content_type: str = "image/jpeg"):

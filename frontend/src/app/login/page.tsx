@@ -11,18 +11,12 @@ export default function LoginPage() {
     const [error, setError] = useState('');
 
     useEffect(() => {
-        // Retrieve access and refresh tokens from URL query parameters if returning from Google Auth
+        // Check for URL errors from Google Auth
         const params = new URLSearchParams(window.location.search);
-        const token = params.get('access_token');
-        const refreshToken = params.get('refresh_token');
         const urlError = params.get('error');
 
         if (urlError) {
             setError(urlError);
-        } else if (token && refreshToken) {
-            localStorage.setItem('token', token);
-            localStorage.setItem('refreshToken', refreshToken);
-            router.push('/dashboard');
         }
     }, [router]);
 
@@ -38,16 +32,14 @@ export default function LoginPage() {
                     'ngrok-skip-browser-warning': 'true'
                 },
                 body: JSON.stringify({ email, password }),
+                credentials: 'include', // Important for cookies
             });
 
-            const data = await res.json();
-
             if (res.ok) {
-                // Store token
-                localStorage.setItem('token', data.access_token);
-                localStorage.setItem('refreshToken', data.refresh_token);
+                // Tokens are set as HttpOnly cookies by the backend
                 router.push('/dashboard');
             } else {
+                const data = await res.json();
                 setError(data.detail || 'Login failed');
             }
         } catch (err) {
@@ -61,7 +53,8 @@ export default function LoginPage() {
             const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/google/url`, {
                 headers: {
                     'ngrok-skip-browser-warning': 'true'
-                }
+                },
+                credentials: 'include'
             });
             const data = await res.json();
             if (data.url) {
