@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from libs.common.serializers import PostCreate, PostResponse, PostStatus, Platform
-from services.post_orchestrator.db import database, Post, PostTarget, PostLog, metadata
+from services.post_orchestrator.db import database, Post, PostTarget, PostLog, Notification, metadata
 import sqlalchemy
 import asyncio
 from services.post_orchestrator.media import generate_upload_url, delete_media_files, get_presigned_download_url
@@ -12,9 +12,79 @@ import json
 import logging
 from libs.common.db import connect_db_with_retry
 from libs.common.logger import log_post_stage
+from arq import create_pool
+from arq.connections import RedisSettings
+import os
+
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("post-orchestrator")
+
+def sanitize_error_message(message: str) -> str:
+    if not message:
+        return message
+    message = re.sub(r'access_token=[^&\s\'"]+', 'access_token=***', message)
+    message = re.sub(r'client_secret=[^&\s\'"]+', 'client_secret=***', message)
+    message = re.sub(r'code=[^&\s\'"]+', 'code=***', message)
+    message = re.sub(r'/uploads(/uploads)+', '/uploads', message)
+    return message
+
+def make_user_friendly_error(message: str) -> str:
+    message = sanitize_error_message(message)
+    def clean_url_match(match):
+        url = match.group(0)
+        base_url = url.split('?')[0]
+        return base_url + "..." if '?' in url else base_url
+    message = re.sub(r'https?://[^\s\'"]+', clean_url_match, message)
+    return message
+
+async def update_post_overall_status(post_uuid: uuid.UUID, cdn_urls: list = None):
+    # Fetch all targets
+    all_targets_query = PostTarget.select().where(PostTarget.c.post_id == post_uuid)
+    targets = await database.fetch_all(all_targets_query)
+    statuses = [t["status"] for t in targets]
+    
+    if not statuses:
+        return
+        
+    if all(s == "published" for s in statuses):
+        overall_status = PostStatus.PUBLISHED.value
+    elif all(s == "failed" for s in statuses):
+        overall_status = PostStatus.FAILED.value
+    elif any(s in ("pending", "processing") for s in statuses):
+        overall_status = PostStatus.PROCESSING.value
+    else:
+        # Mix of published and failed, and no pending/processing
+        overall_status = PostStatus.PARTIAL.value
+        
+    update_vals = {
+        "status": overall_status,
+        "updated_at": datetime.utcnow()
+    }
+    if cdn_urls:
+        update_vals["media_key"] = cdn_urls[0]
+        update_vals["media_keys"] = json.dumps(cdn_urls)
+        
+    query = Post.update().where(Post.c.id == post_uuid).values(**update_vals)
+    await database.execute(query)
+    logger.info(f"Updated main post {post_uuid} overall status to {overall_status}")
+
+async def create_notification(user_id: str, title: str, message: str, notification_type: str):
+    try:
+        query = Notification.insert().values(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            title=title,
+            message=message,
+            type=notification_type,
+            read=False,
+            created_at=datetime.utcnow()
+        )
+        await database.execute(query)
+        logger.info(f"Created {notification_type} notification for user {user_id}: {title}")
+    except Exception as e:
+        logger.error(f"Failed to create notification: {e}")
 
 async def handle_post_success(data: dict, platform: str):
     post_id = data.get("post_id")
@@ -46,25 +116,17 @@ async def handle_post_success(data: dict, platform: str):
         existing_post = await database.fetch_one(post_query)
         
         original_keys = []
-        if existing_post and existing_post["media_keys"]:
-            try:
-                original_keys = json.loads(existing_post["media_keys"])
-            except Exception:
-                original_keys = [existing_post["media_keys"]]
+        user_id = None
+        if existing_post:
+            user_id = existing_post["user_id"]
+            if existing_post["media_keys"]:
+                try:
+                    original_keys = json.loads(existing_post["media_keys"])
+                except Exception:
+                    original_keys = [existing_post["media_keys"]]
         
-        # Update main post status to published and swap media keys if CDN URLs exist
-        update_vals = {
-            "status": PostStatus.PUBLISHED.value,
-            "updated_at": datetime.utcnow()
-        }
-        
-        if cdn_urls:
-            update_vals["media_key"] = cdn_urls[0]
-            update_vals["media_keys"] = json.dumps(cdn_urls)
-            
-        query = Post.update().where(Post.c.id == post_uuid).values(**update_vals)
-        await database.execute(query)
-        logger.info(f"Successfully updated post {post_id} target ({platform}) to PUBLISHED in DB")
+        # Update main post status dynamically
+        await update_post_overall_status(post_uuid, cdn_urls)
         
         # 3. Clean up the original local MinIO files since Facebook has copied them to its CDN
         if cdn_urls and original_keys:
@@ -86,16 +148,25 @@ async def handle_post_success(data: dict, platform: str):
                 fut.add_done_callback(cleanup_done_callback)
                 logger.info(f"Triggered background cleanup of {len(local_keys_to_delete)} local MinIO files for post {post_id}")
             
+        # 4. Send success notification
+        if user_id:
+            title = f"Posted to {platform.capitalize()}"
+            message = f"Your post was successfully published to {platform.capitalize()}."
+            await create_notification(user_id, title, message, "success")
+            
     except Exception as e:
         logger.error(f"Failed to update post success in DB: {e}")
 
 async def handle_post_failed(data: dict, platform: str):
     post_id = data.get("post_id")
-    reason = data.get("reason", "unknown error")
-    logger.info(f"Received failed event for post {post_id} on platform {platform} due to: {reason}")
+    raw_reason = data.get("reason", "unknown error")
+    sanitized_reason = sanitize_error_message(raw_reason)
+    user_friendly_reason = make_user_friendly_error(raw_reason)
+
+    logger.info(f"Received failed event for post {post_id} on platform {platform} due to: {sanitized_reason}")
     await log_post_stage(
         database, post_id, "orchestrator", "platform_failed", "ERROR",
-        f"Platform '{platform}' posting failed. Reason: {reason}"
+        f"Platform '{platform}' posting failed. Reason: {sanitized_reason}"
     )
     try:
         post_uuid = uuid.UUID(post_id)
@@ -109,33 +180,34 @@ async def handle_post_failed(data: dict, platform: str):
         )
         await database.execute(target_query)
 
-        # 2. Check if ALL targets for this post have failed
-        # If all have failed, set the main post status to failed
-        all_targets_query = PostTarget.select().where(PostTarget.c.post_id == post_uuid)
-        targets = await database.fetch_all(all_targets_query)
-        statuses = [t["status"] for t in targets]
-        if all(s == "failed" for s in statuses):
-            query = Post.update().where(Post.c.id == post_uuid).values(
-                status=PostStatus.FAILED.value,
-                updated_at=datetime.utcnow()
-            )
-            await database.execute(query)
-            logger.info(f"Successfully updated main post {post_id} to FAILED in DB (all targets failed)")
-        else:
-            # If at least one target succeeded, main post status might be published
-            if any(s == "published" for s in statuses):
-                query = Post.update().where(Post.c.id == post_uuid).values(
-                    status=PostStatus.PUBLISHED.value,
-                    updated_at=datetime.utcnow()
-                )
-                await database.execute(query)
-            logger.info(f"Updated post target {platform} to FAILED for post {post_id}")
+        # 2. Get user_id for notifications
+        post_query = Post.select().where(Post.c.id == post_uuid)
+        existing_post = await database.fetch_one(post_query)
+        user_id = existing_post["user_id"] if existing_post else None
+
+        # 3. Update main post status dynamically
+        await update_post_overall_status(post_uuid)
+        
+        # 4. Send failure notification
+        if user_id:
+            title = f"Failed to post to {platform.capitalize()}"
+            message = f"Failed to publish to {platform.capitalize()}: {user_friendly_reason}"
+            await create_notification(user_id, title, message, "error")
+            
     except Exception as e:
         logger.error(f"Failed to update post failure in DB: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_db_with_retry(database)
+    
+    # Initialize ARQ pool for background tasks
+    redis_pool = await create_pool(RedisSettings(
+        host=os.getenv('REDIS_HOST', 'redis'),
+        port=int(os.getenv('REDIS_PORT', 6379)),
+        database=int(os.getenv('REDIS_DB', 0)),
+    ))
+    app.state.arq_pool = redis_pool
     
     # Create tables (for simplicity in this monorepo setup)
     engine = sqlalchemy.create_engine(str(database.url))
@@ -162,6 +234,21 @@ async def lifespan(app: FastAPI):
                 if "is_reel" not in columns:
                     conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN is_reel BOOLEAN DEFAULT FALSE"))
                     logger.info("Migrated schema: Added column is_reel to posts table")
+                if "audio_key" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN audio_key VARCHAR"))
+                    logger.info("Migrated schema: Added column audio_key to posts table")
+                if "music_volume" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN music_volume DOUBLE PRECISION DEFAULT 0.2"))
+                    logger.info("Migrated schema: Added column music_volume to posts table")
+                if "video_volume" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN video_volume DOUBLE PRECISION DEFAULT 1.0"))
+                    logger.info("Migrated schema: Added column video_volume to posts table")
+                if "slideshow_duration" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN slideshow_duration INTEGER DEFAULT 10"))
+                    logger.info("Migrated schema: Added column slideshow_duration to posts table")
+                if "job_id" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN job_id VARCHAR"))
+                    logger.info("Migrated schema: Added column job_id to posts table")
                 
                 # Check and add unique constraint
                 # uq_user_platform_external_post unique constraint
@@ -221,6 +308,10 @@ async def lifespan(app: FastAPI):
         await mq.disconnect()
     except Exception:
         pass
+    try:
+        await app.state.arq_pool.close()
+    except Exception:
+        pass
     await database.disconnect()
 
 app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
@@ -228,6 +319,7 @@ app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
 @app.post("/posts", response_model=PostResponse)
 async def create_post(post_data: PostCreate, user_id: str):
     import json
+    from services.post_orchestrator.media import process_and_mix_media
     
     media_key = post_data.media_key
     media_keys = post_data.media_keys
@@ -236,6 +328,98 @@ async def create_post(post_data: PostCreate, user_id: str):
     if not media_keys and media_key:
         media_keys = [media_key]
         
+    # Check if FFmpeg processing is needed
+    needs_processing = False
+    if media_keys:
+        from services.post_orchestrator.media import is_image_file, is_video_file
+        is_all_images = all(is_image_file(k) for k in media_keys)
+        is_single_video = len(media_keys) == 1 and is_video_file(media_keys[0])
+        needs_slideshow = post_data.is_reel and is_all_images and len(media_keys) > 0
+        needs_audio_mix = post_data.audio_key and (needs_slideshow or is_single_video)
+        needs_processing = needs_slideshow or needs_audio_mix
+    
+    job_id = str(uuid.uuid4())
+    
+    if needs_processing:
+        # Enqueue background task for FFmpeg processing
+        logger.info(f"Enqueueing background media processing job {job_id}")
+        await app.state.arq_pool.enqueue_job(
+            'process_media_task',
+            job_id=job_id,
+            user_id=user_id,
+            media_keys=media_keys or [],
+            audio_key=post_data.audio_key,
+            is_reel=post_data.is_reel,
+            music_volume=post_data.music_volume or 0.2,
+            video_volume=post_data.video_volume or 1.0,
+            slideshow_duration=post_data.slideshow_duration or 10
+        )
+        
+        # Create post with "processing" status and job_id
+        query = Post.insert().values(
+            id=uuid.uuid4(),
+            content=post_data.content,
+            media_key=media_key,
+            media_keys=json.dumps(media_keys) if media_keys else None,
+            is_reel=post_data.is_reel,
+            status=PostStatus.PROCESSING.value,
+            user_id=user_id,
+            audio_key=post_data.audio_key,
+            music_volume=post_data.music_volume,
+            video_volume=post_data.video_volume,
+            slideshow_duration=post_data.slideshow_duration,
+            job_id=job_id,  # Store job_id for tracking
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        ).returning(Post)
+        
+        post = await database.fetch_one(query)
+        
+        await log_post_stage(
+            database, post['id'], "orchestrator", "post_created", "INFO",
+            f"Post created with background processing job {job_id}. Targets: {[p.value if hasattr(p, 'value') else str(p) for p in post_data.platforms]}"
+        )
+        
+        # Store Metadata (Targets)
+        for platform in post_data.platforms:
+            target_query = PostTarget.insert().values(
+                id=uuid.uuid4(),
+                post_id=post['id'],
+                platform=platform.value if hasattr(platform, "value") else str(platform),
+                status="pending"
+            )
+            await database.execute(target_query)
+            
+        # Return post with processing status (media will be updated when job completes)
+        return PostResponse(
+            id=post['id'],
+            content=post['content'],
+            media_key=get_presigned_download_url(post['media_key']),
+            media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
+            platforms=post_data.platforms,
+            is_reel=post['is_reel'],
+            status=PostStatus(post['status']),
+            created_at=post['created_at'],
+            updated_at=post['updated_at']
+        )
+    else:
+        # No processing needed, proceed as before
+        compiled_result = await process_and_mix_media(
+            user_id=user_id,
+            media_keys=media_keys or [],
+            audio_key=post_data.audio_key,
+            is_reel=post_data.is_reel,
+            music_volume=post_data.music_volume or 0.2,
+            video_volume=post_data.video_volume or 1.0,
+            slideshow_duration=post_data.slideshow_duration or 10
+        )
+        
+        if compiled_result:
+            media_key = compiled_result["media_key"]
+            media_keys = compiled_result["media_keys"]
+            post_data.media_key = media_key
+            post_data.media_keys = media_keys
+
     # 1. Store in DB
     query = Post.insert().values(
         id=uuid.uuid4(),
@@ -245,6 +429,10 @@ async def create_post(post_data: PostCreate, user_id: str):
         is_reel=post_data.is_reel,
         status=PostStatus.PENDING.value,
         user_id=user_id,
+        audio_key=post_data.audio_key,
+        music_volume=post_data.music_volume,
+        video_volume=post_data.video_volume,
+        slideshow_duration=post_data.slideshow_duration,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     ).returning(Post)
@@ -483,12 +671,28 @@ async def get_post(post_id: uuid.UUID):
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
         
+    targets_query = PostTarget.select().where(PostTarget.c.post_id == post_id)
+    targets = await database.fetch_all(targets_query)
+    platforms = []
+    for t in targets:
+        try:
+            platforms.append(Platform(t["platform"]))
+        except ValueError:
+            pass
+    if not platforms and post["platform"]:
+        try:
+            platforms.append(Platform(post["platform"]))
+        except ValueError:
+            pass
+    if not platforms:
+        platforms = [Platform.FACEBOOK]
+        
     return PostResponse(
         id=post['id'],
         content=post['content'],
         media_key=get_presigned_download_url(post['media_key']),
         media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
-        platforms=[Platform.FACEBOOK], # Mocked
+        platforms=platforms,
         is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
@@ -522,20 +726,62 @@ async def list_posts(user_id: str):
     query = Post.select().where(Post.c.user_id == user_id).order_by(Post.c.created_at.desc())
     posts = await database.fetch_all(query)
     
+    if not posts:
+        return []
+        
+    post_ids = [p['id'] for p in posts]
+    targets_query = PostTarget.select().where(PostTarget.c.post_id.in_(post_ids))
+    targets = await database.fetch_all(targets_query)
+    
+    from collections import defaultdict
+    post_platforms = defaultdict(list)
+    for t in targets:
+        try:
+            post_platforms[t["post_id"]].append(Platform(t["platform"]))
+        except ValueError:
+            pass
+            
     import json
-    return [
-        PostResponse(
+    results = []
+    for p in posts:
+        platforms = post_platforms[p['id']]
+        if not platforms:
+            if p['platform']:
+                try:
+                    platforms = [Platform(p['platform'])]
+                except ValueError:
+                    platforms = [Platform.FACEBOOK]
+            else:
+                platforms = [Platform.FACEBOOK]
+        results.append(PostResponse(
             id=p['id'],
             content=p['content'],
             media_key=get_presigned_download_url(p['media_key']),
             media_keys=[get_presigned_download_url(k) for k in json.loads(p['media_keys'])] if p['media_keys'] else None,
-            platforms=[Platform.FACEBOOK], # Mocked for list view for now
+            platforms=platforms,
             is_reel=p['is_reel'],
             status=PostStatus(p['status']),
             created_at=p['created_at'],
             updated_at=p['updated_at']
-        ) for p in posts
-    ]
+        ))
+    return results
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """Get the status of a background media processing job."""
+    import redis.asyncio as redis
+    
+    redis_client = await redis.from_url(
+        f"redis://{os.getenv('REDIS_HOST', 'redis')}:{os.getenv('REDIS_PORT', 6379)}/{os.getenv('REDIS_DB', 0)}"
+    )
+    
+    job_data = await redis_client.get(f"job:{job_id}")
+    await redis_client.close()
+    
+    if not job_data:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    
+    return json.loads(job_data)
 
 @app.post("/media/upload-url")
 async def get_upload_url(filename: str, user_id: str, content_type: str = "image/jpeg"):
@@ -563,6 +809,7 @@ async def sync_posts(user_id: str):
     # Ideally we'd ask a central registry or check credentials, but for simplicity we'll try all known services
     services = [
         {"name": "facebook", "url": "http://facebook-service:8000/feed"},
+        {"name": "instagram", "url": "http://instagram-service:8000/feed"},
         # Add others as implemented:
         # {"name": "linkedin", "url": "http://linkedin-service:8000/feed"},
     ]
@@ -658,3 +905,25 @@ async def get_post_metrics(post_id: uuid.UUID, user_id: str):
         "platforms": metrics_by_platform,
         "total": total_metrics
     }
+
+
+@app.get("/notifications")
+async def get_notifications(user_id: str):
+    query = Notification.select().where(Notification.c.user_id == user_id).order_by(Notification.c.created_at.desc())
+    return await database.fetch_all(query)
+
+
+@app.post("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: uuid.UUID, user_id: str):
+    query = Notification.update().where(
+        (Notification.c.id == notification_id) & (Notification.c.user_id == user_id)
+    ).values(read=True)
+    await database.execute(query)
+    return {"status": "success"}
+
+
+@app.post("/notifications/read-all")
+async def mark_all_notifications_read(user_id: str):
+    query = Notification.update().where(Notification.c.user_id == user_id).values(read=True)
+    await database.execute(query)
+    return {"status": "success"}

@@ -4,6 +4,7 @@ import httpx
 import os
 import json
 from libs.common.messaging import MessageQueue
+from libs.common.logger import sanitize_error_message
 
 logger = logging.getLogger("linkedin-service")
 mq = MessageQueue("linkedin-service")
@@ -96,10 +97,15 @@ class LinkedInClient:
         await self.client.aclose()
 
 
-async def post_to_linkedin(post_id: str, content: str, access_token: str, urn: str, media_url: str = None):
+async def post_to_linkedin(post_id: str, content: str, access_token: str, urn: str, media_url: str = None, media_urls: list = None):
+    # Fallback to the first item in media_urls if media_url is not specified
+    final_url = media_url
+    if not final_url and media_urls:
+        final_url = media_urls[0]
+
     client = LinkedInClient(access_token, urn)
     try:
-        result = await client.post_ugc(content, media_url)
+        result = await client.post_ugc(content, final_url)
         logger.info(f"Successfully posted {post_id} to LinkedIn: {result}")
         await mq.publish("posts.linkedin.success", {
             "post_id": post_id, 
@@ -111,7 +117,7 @@ async def post_to_linkedin(post_id: str, content: str, access_token: str, urn: s
         await mq.publish("posts.linkedin.failed", {
             "post_id": post_id, 
             "status": "failed", 
-            "reason": str(e)
+            "reason": sanitize_error_message(str(e))
         })
     finally:
         await client.close()

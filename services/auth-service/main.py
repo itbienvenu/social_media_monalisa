@@ -1,9 +1,9 @@
 # pyright: ignore [reportMissingImport]
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 import logging
 import os
 import datetime
-from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi import FastAPI, HTTPException, status, Depends, Cookie
 from contextlib import asynccontextmanager
 import sqlalchemy
 from pydantic import BaseModel
@@ -96,6 +96,38 @@ def create_refresh_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    """Set HttpOnly; Secure; SameSite=Lax cookies for auth tokens"""
+    # Determine if we're in development or production
+    is_secure = os.getenv("ENVIRONMENT", "development") != "development"
+    
+    # Set access token cookie (30 minutes)
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=is_secure,
+        samesite="lax",
+        max_age=1800,  # 30 minutes
+        path="/"
+    )
+    
+    # Set refresh token cookie (60 days)
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=is_secure,
+        samesite="lax",
+        max_age=5184000,  # 60 days
+        path="/"
+    )
+
+def clear_auth_cookies(response: Response):
+    """Clear auth cookies"""
+    response.delete_cookie(key="access_token", path="/")
+    response.delete_cookie(key="refresh_token", path="/")
+
 app = FastAPI(title="Auth Service", lifespan=lifespan)
 
 @app.post("/register", response_model=UserProfile)
@@ -158,11 +190,15 @@ async def login(user: UserCreate):
             
         access_token = create_access_token(data={"sub": db_user['id'], "email": db_user['email']})
         refresh_token = create_refresh_token(data={"sub": db_user['id'], "email": db_user['email']})
-        return {
+        
+        # Set HttpOnly cookies for security
+        response = JSONResponse(content={
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer"
-        }
+        })
+        set_auth_cookies(response, access_token, refresh_token)
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -193,9 +229,18 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 @app.post("/refresh", response_model=Token)
-async def refresh(request: RefreshRequest):
+async def refresh(request: RefreshRequest, refresh_token: str = Cookie(None)):
     try:
-        payload = jwt.decode(request.refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Use cookie refresh token if available, otherwise use request body
+        token_to_use = refresh_token if refresh_token else request.refresh_token
+        
+        if not token_to_use:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing refresh token",
+            )
+            
+        payload = jwt.decode(token_to_use, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -217,11 +262,15 @@ async def refresh(request: RefreshRequest):
             )
         new_access = create_access_token(data={"sub": user_id, "email": email})
         new_refresh = create_refresh_token(data={"sub": user_id, "email": email})
-        return {
+        
+        # Set HttpOnly cookies for security
+        response = JSONResponse(content={
             "access_token": new_access,
             "refresh_token": new_refresh,
             "token_type": "bearer"
-        }
+        })
+        set_auth_cookies(response, new_access, new_refresh)
+        return response
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -244,3 +293,167 @@ async def health():
             status_code=503,
             content={"status": "error", "database": "disconnected", "detail": "Database connection error"}
         )
+
+@app.post("/logout")
+async def logout():
+    """Clear auth cookies"""
+    response = JSONResponse(content={"message": "Logged out successfully"})
+    clear_auth_cookies(response)
+    return response
+
+@app.get("/auth/google/url")
+async def get_google_auth_url():
+    import secrets
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+    BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+    REDIRECT_URI = f"{BASE_URL}/auth/google/callback"
+    MOCK_MODE = os.getenv("MOCK_MODE", "false")
+
+    state = secrets.token_urlsafe(32)
+    is_secure = os.getenv("ENVIRONMENT", "development") != "development"
+
+    if MOCK_MODE == "true":
+        mock_callback_url = f"{BASE_URL}/auth/google/callback?code=mock_google_code&state={state}"
+        response = JSONResponse(content={"url": mock_callback_url})
+        response.set_cookie(
+            key="oauth_state",
+            value=state,
+            httponly=True,
+            secure=is_secure,
+            samesite="lax",
+            max_age=600,
+            path="/"
+        )
+        return response
+
+    if not GOOGLE_CLIENT_ID:
+        logger.error("Google OAuth client ID is missing and MOCK_MODE is not set to 'true'.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google OAuth configuration is missing on the server"
+        )
+
+    scopes = "openid email profile"
+    auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth?"
+        f"client_id={GOOGLE_CLIENT_ID}&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"response_type=code&"
+        f"scope={scopes}&"
+        f"state={state}&"
+        f"access_type=offline&"
+        f"prompt=consent"
+    )
+    response = JSONResponse(content={"url": auth_url})
+    response.set_cookie(
+        key="oauth_state",
+        value=state,
+        httponly=True,
+        secure=is_secure,
+        samesite="lax",
+        max_age=600,
+        path="/"
+    )
+    return response
+
+@app.get("/auth/google/callback")
+async def google_callback(
+    code: str,
+    state: str = None,
+    oauth_state: str = Cookie(None)
+):
+    import httpx
+    import uuid
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+    BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    REDIRECT_URI = f"{BASE_URL}/auth/google/callback"
+    MOCK_MODE = os.getenv("MOCK_MODE", "false")
+
+    # Verify state parameter to prevent login CSRF
+    if not state or not oauth_state or state != oauth_state:
+        logger.error(f"Google OAuth callback: state mismatch. state={state}, oauth_state={oauth_state}")
+        response = RedirectResponse(url=f"{FRONTEND_URL}/login?error=Invalid state parameter")
+        response.delete_cookie(key="oauth_state", path="/")
+        return response
+
+    email = None
+
+    if MOCK_MODE == "true":
+        email = "mock_google_user@example.com"
+        logger.info(f"Mocking Google Auth Callback for email: {email}")
+    else:
+        if code == "mock_google_code":
+            logger.error("Attempted to use mock auth code when MOCK_MODE is not enabled.")
+            response = RedirectResponse(url=f"{FRONTEND_URL}/login?error=Invalid authorization code")
+            response.delete_cookie(key="oauth_state", path="/")
+            return response
+            
+        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+            logger.error("Google OAuth credentials are missing and MOCK_MODE is not enabled.")
+            response = RedirectResponse(url=f"{FRONTEND_URL}/login?error=Google OAuth is not configured on the server")
+            response.delete_cookie(key="oauth_state", path="/")
+            return response
+        token_url = "https://oauth2.googleapis.com/token"
+        data = {
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": REDIRECT_URI,
+            "grant_type": "authorization_code"
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(token_url, data=data)
+                resp.raise_for_status()
+                token_data = resp.json()
+                access_token = token_data.get("access_token")
+                
+                userinfo_url = "https://www.googleapis.com/oauth2/v3/userinfo"
+                headers = {"Authorization": f"Bearer {access_token}"}
+                userinfo_resp = await client.get(userinfo_url, headers=headers)
+                userinfo_resp.raise_for_status()
+                userinfo = userinfo_resp.json()
+                email = userinfo.get("email")
+            except Exception as e:
+                logger.error(f"Failed to complete Google OAuth exchange: {e}")
+                response = RedirectResponse(url=f"{FRONTEND_URL}/login?error=Google auth failed")
+                response.delete_cookie(key="oauth_state", path="/")
+                return response
+
+    if not email:
+        response = RedirectResponse(url=f"{FRONTEND_URL}/login?error=Failed to retrieve email from Google")
+        response.delete_cookie(key="oauth_state", path="/")
+        return response
+
+    query = users.select().where(users.c.email == email)
+    db_user = await database.fetch_one(query)
+    
+    user_id = None
+    if not db_user:
+        user_id = str(uuid.uuid4())
+        import secrets
+        dummy_password = secrets.token_hex(16)
+        hashed_pw = get_password_hash(dummy_password)
+        
+        insert_query = users.insert().values(
+            id=user_id,
+            email=email,
+            hashed_password=hashed_pw,
+            is_active=True
+        )
+        await database.execute(insert_query)
+        logger.info(f"New user registered via Google: {email}")
+    else:
+        user_id = db_user['id']
+        logger.info(f"Existing user logged in via Google: {email}")
+
+    access_token = create_access_token(data={"sub": user_id, "email": email})
+    refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
+
+    # Set HttpOnly cookies and redirect to dashboard without tokens in URL
+    response = RedirectResponse(url=f"{FRONTEND_URL}/dashboard")
+    response.delete_cookie(key="oauth_state", path="/")
+    set_auth_cookies(response, access_token, refresh_token)
+    return response

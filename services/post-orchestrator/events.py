@@ -7,9 +7,18 @@ mq = MessageQueue("post-orchestrator")
 import os
 
 S3_ENDPOINT = os.getenv("MINIO_ENDPOINT_URL", "http://minio:9000")
-S3_BUCKET = os.getenv("S3_BUCKET_NAME", "social-media-content")
+S3_BUCKET = os.getenv("MINIO_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME") or "uploads"
 
 async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: str, media_key: str = None, user_id: str = "anonymous", media_keys: list = None, is_reel: bool = False, facebook_page_id: str = None):
+    mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
+    public_base_url = os.getenv("PUBLIC_BASE_URL")
+    if not mock_mode and not public_base_url:
+        raise ValueError("PUBLIC_BASE_URL environment variable is required in non-mock mode to build internet-reachable media URLs for external platforms.")
+        
+    base_url = public_base_url or "http://localhost:8000"
+    if base_url.endswith("/"):
+        base_url = base_url[:-1]
+
     # Construct media_url if key exists
     # Note: In production, this should be a presigned GET URL or a CDN URL.
     # For now, we use the direct MinIO/S3 URL accessible by the implementation services.
@@ -26,48 +35,20 @@ async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: st
         if not isinstance(key, str) or not key:
             continue
         url = None
+        obj_key = key
         if key.startswith("http://") or key.startswith("https://"):
-            # Extract key and bucket from public_url if it's our own
-            # public_url format: f"{base_url}/uploads/{bucket}/{object_key}"
-            if "/uploads/" in key:
-                parts = key.split("/uploads/", 1)[1].split("/", 1)
-                if len(parts) == 2:
-                    bucket_name, obj_key = parts
-                    try:
-                        s3_client = boto3.client(
-                            "s3",
-                            endpoint_url=S3_ENDPOINT,
-                            aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-                            aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
-                            config=boto3.session.Config(signature_version='s3v4')
-                        )
-                        url = s3_client.generate_presigned_url(
-                            'get_object',
-                            Params={'Bucket': bucket_name, 'Key': obj_key},
-                            ExpiresIn=3600
-                        )
-                    except Exception as e:
-                        url = f"{S3_ENDPOINT}/{bucket_name}/{obj_key}"
-                else:
-                    url = key
+            parts = key.split(f"/uploads/{S3_BUCKET}/")
+            if len(parts) > 1:
+                obj_key = parts[1].split("?")[0]
             else:
-                url = key
-        else:
-            try:
-                s3_client = boto3.client(
-                    "s3",
-                    endpoint_url=S3_ENDPOINT,
-                    aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-                    aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
-                    config=boto3.session.Config(signature_version='s3v4')
-                )
-                url = s3_client.generate_presigned_url(
-                    'get_object',
-                    Params={'Bucket': S3_BUCKET, 'Key': key},
-                    ExpiresIn=3600
-                )
-            except Exception as e:
-                url = f"{S3_ENDPOINT}/{S3_BUCKET}/{key}"
+                import re
+                match = re.search(r'uploads/.*', key)
+                if match:
+                    obj_key = match.group(0).split("?")[0]
+        
+        from libs.common.signatures import sign_url_path
+        exp, sig = sign_url_path(S3_BUCKET, obj_key)
+        url = f"{base_url}/uploads/{S3_BUCKET}/{obj_key}?exp={exp}&sig={sig}"
         media_urls.append(url)
 
     if media_urls:

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Header, Response
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse
 from libs.common.auth import verify_token
 from libs.common.serializers import PostCreate, PostResponse
 import httpx
@@ -8,6 +8,8 @@ import os
 router = APIRouter()
 
 POST_ORCHESTRATOR_URL = "http://post-orchestrator:8000"
+AUTH_SERVICE_URL = "http://auth-service:8000"
+
 
 @router.post("/posts", response_model=PostResponse)
 async def create_post(
@@ -123,6 +125,41 @@ async def get_post_logs(post_id: str, user_info: dict = Depends(verify_token)):
              raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
 
+@router.get("/jobs/{job_id}")
+async def get_job_status(job_id: str, user_info: dict = Depends(verify_token)):
+    """Get the status of a background media processing job."""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{POST_ORCHESTRATOR_URL}/jobs/{job_id}"
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    """Logout user by clearing auth cookies."""
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(
+                f"{AUTH_SERVICE_URL}/logout"
+            )
+            resp.raise_for_status()
+            res = JSONResponse(content=resp.json())
+            for cookie in resp.headers.getlist("set-cookie"):
+                res.headers.append("set-cookie", cookie)
+            return res
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
 # --- Connections Management ---
 
 @router.get("/connections")
@@ -206,28 +243,90 @@ async def register_proxy(request: Request):
     async with httpx.AsyncClient() as client:
         try:
             body = await request.json()
-            resp = await client.post("http://auth-service:8000/register", json=body)
-            return JSONResponse(status_code=resp.status_code, content=resp.json())
+            resp = await client.post(f"{AUTH_SERVICE_URL}/register", json=body)
+            res = JSONResponse(status_code=resp.status_code, content=resp.json())
+            for cookie in resp.headers.getlist("set-cookie"):
+                res.headers.append("set-cookie", cookie)
+            return res
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/auth/login")
-async def login_proxy(request: Request):
+async def login_proxy(request: Request, response: Response):
     async with httpx.AsyncClient() as client:
         try:
             body = await request.json()
-            resp = await client.post("http://auth-service:8000/login", json=body)
-            return JSONResponse(status_code=resp.status_code, content=resp.json())
+            resp = await client.post(f"{AUTH_SERVICE_URL}/login", json=body)
+            res = JSONResponse(status_code=resp.status_code, content=resp.json())
+            for cookie in resp.headers.getlist("set-cookie"):
+                res.headers.append("set-cookie", cookie)
+            return res
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/auth/refresh")
-async def refresh_proxy(request: Request):
+async def refresh_proxy(request: Request, response: Response):
     async with httpx.AsyncClient() as client:
         try:
             body = await request.json()
-            resp = await client.post("http://auth-service:8000/refresh", json=body)
-            return JSONResponse(status_code=resp.status_code, content=resp.json())
+            # Forward the incoming cookies (which contain the refresh token)
+            headers = {}
+            cookie_header = request.headers.get("cookie")
+            if cookie_header:
+                headers["cookie"] = cookie_header
+
+            resp = await client.post(f"{AUTH_SERVICE_URL}/refresh", json=body, headers=headers)
+            res = JSONResponse(status_code=resp.status_code, content=resp.json())
+            for cookie in resp.headers.getlist("set-cookie"):
+                res.headers.append("set-cookie", cookie)
+            return res
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/auth/google/url")
+async def get_google_auth_url(response: Response):
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(f"{AUTH_SERVICE_URL}/auth/google/url")
+            resp.raise_for_status()
+            
+            # Forward Set-Cookie headers (which contains the oauth_state cookie)
+            for cookie in resp.headers.getlist("set-cookie"):
+                response.headers.append("set-cookie", cookie)
+                
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/auth/google/callback")
+async def google_callback(code: str, state: str, request: Request, response: Response):
+    async with httpx.AsyncClient() as client:
+        try:
+            # Forward the incoming cookies (which contain oauth_state)
+            headers = {}
+            cookie_header = request.headers.get("cookie")
+            if cookie_header:
+                headers["cookie"] = cookie_header
+
+            resp = await client.get(
+                f"{AUTH_SERVICE_URL}/auth/google/callback",
+                params={"code": code, "state": state},
+                headers=headers,
+                follow_redirects=False
+            )
+            
+            # Forward any cookies set by auth-service (like access_token, refresh_token, or deleting oauth_state)
+            for cookie in resp.headers.getlist("set-cookie"):
+                response.headers.append("set-cookie", cookie)
+
+            if resp.status_code in (301, 302, 307, 308):
+                return RedirectResponse(url=resp.headers["location"], status_code=resp.status_code)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -260,17 +359,36 @@ async def upload_url_proxy(
 async def get_upload_proxy(
     bucket: str, 
     key: str,
-    user_info: dict = Depends(verify_token)
+    request: Request
 ):
-    token_user_id = user_info.get("user_id")
+    # Public endpoint to allow external social media platforms (Facebook, Instagram, etc.) to fetch the media files
     
-    # Enforce user ownership
-    key_parts = key.strip("/").split("/")
-    if len(key_parts) >= 2 and key_parts[0] == "uploads":
-        file_user_id = key_parts[1]
-        if file_user_id != token_user_id:
-            raise HTTPException(status_code=403, detail="Forbidden: You do not own this resource")
-            
+    # Restrict bucket to configured uploads bucket only
+    ALLOWED_BUCKETS = {
+        os.getenv("MINIO_BUCKET_NAME", "uploads"),
+        os.getenv("S3_BUCKET_NAME", "uploads"),
+        "uploads",
+        "social-media-uploads"
+    }
+    if bucket not in ALLOWED_BUCKETS:
+        raise HTTPException(status_code=403, detail="Access denied: invalid bucket")
+
+    # Restrict key to safe prefix
+    if not key.startswith("uploads/"):
+        raise HTTPException(status_code=403, detail="Access denied: invalid key prefix")
+
+    # Verify signature and expiration
+    from libs.common.signatures import verify_url_path
+    
+    exp_val = request.query_params.get("exp")
+    sig = request.query_params.get("sig")
+    
+    if not exp_val or not sig:
+        raise HTTPException(status_code=403, detail="Access denied: missing signature parameters")
+        
+    if not verify_url_path(bucket, key, exp_val, sig):
+        raise HTTPException(status_code=403, detail="Access denied: invalid or expired signature")
+
     import boto3
     from botocore.exceptions import ClientError
     
@@ -282,16 +400,104 @@ async def get_upload_proxy(
             aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadminpassword"),
             config=boto3.session.Config(signature_version='s3v4')
         )
-        response = s3_client.get_object(Bucket=bucket, Key=key)
-        content = response['Body'].read()
-        media_type = response.get('ContentType', 'application/octet-stream')
-        return Response(content=content, media_type=media_type)
+        
+        # Support Range requests
+        params = {"Bucket": bucket, "Key": key}
+        range_header = request.headers.get("range")
+        if range_header:
+            params["Range"] = range_header
+            
+        response_s3 = s3_client.get_object(**params)
+        media_type = response_s3.get('ContentType', 'application/octet-stream')
+        
+        # Build headers
+        res_headers = {
+            "Accept-Ranges": "bytes"
+        }
+        if "ContentRange" in response_s3:
+            res_headers["Content-Range"] = response_s3["ContentRange"]
+        if "ContentLength" in response_s3:
+            res_headers["Content-Length"] = str(response_s3["ContentLength"])
+        if "ETag" in response_s3:
+            res_headers["ETag"] = response_s3["ETag"]
+        if "LastModified" in response_s3:
+            res_headers["Last-Modified"] = response_s3["LastModified"].strftime("%a, %d %b %Y %H:%M:%S GMT")
+            
+        status_code = 206 if range_header else 200
+        
+        def chunk_generator(body):
+            for chunk in body.iter_chunks(chunk_size=65536):
+                yield chunk
+                
+        return StreamingResponse(
+            chunk_generator(response_s3['Body']),
+            status_code=status_code,
+            headers=res_headers,
+            media_type=media_type
+        )
     except ClientError as e:
         status_code = e.response.get('ResponseMetadata', {}).get('HTTPStatusCode', 500)
         raise HTTPException(status_code=status_code, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# --- Notifications Proxy ---
+
+@router.get("/notifications")
+async def get_notifications(
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{POST_ORCHESTRATOR_URL}/notifications",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: str,
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{POST_ORCHESTRATOR_URL}/notifications/{notification_id}/read",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/notifications/read-all")
+async def mark_all_notifications_read(
+    user_info: dict = Depends(verify_token)
+):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{POST_ORCHESTRATOR_URL}/notifications/read-all",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 FACEBOOK_SERVICE_URL = "http://facebook-service:8000"

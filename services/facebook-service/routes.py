@@ -25,11 +25,14 @@ async def connect_facebook(user_id: str):
     Returns the Facebook OAuth URL.
     """
     FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID")
-    # Use BASE_URL from env or default to localhost
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
-    # Should match the one configured in Facebook App > Facebook Login > Settings > Valid OAuth Redirect URIs
     REDIRECT_URI = f"{base_url}/auth/facebook/callback"
     
+    if os.getenv("MOCK_MODE") == "true" or not FACEBOOK_APP_ID:
+        # Return direct local redirect to callback to auto-mock connection
+        mock_callback_url = f"{base_url}/auth/facebook/callback?code=mock_code&state={user_id}"
+        return ConnectResponse(url=mock_callback_url)
+        
     # Scopes for Page Management
     SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts,pages_manage_metadata"
     

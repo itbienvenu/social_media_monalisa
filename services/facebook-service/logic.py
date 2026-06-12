@@ -4,7 +4,7 @@ import httpx
 import os
 from libs.common.messaging import MessageQueue
 from services.facebook_service.db import database
-from libs.common.logger import log_post_stage
+from libs.common.logger import log_post_stage, sanitize_error_message
 
 logger = logging.getLogger("facebook-service")
 mq = MessageQueue("facebook-service")
@@ -862,7 +862,7 @@ async def post_to_facebook(post_id: str, content: str, access_token: str, page_i
             "post_id": post_id, 
             "status": "failed",
             "platform": "facebook",
-            "reason": str(e)
+            "reason": sanitize_error_message(str(e))
         })
     finally:
         await client.close()
