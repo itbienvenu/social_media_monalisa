@@ -8,6 +8,9 @@ async def verify_token(
     authorization: Optional[str] = Header(None),
     access_token: Optional[str] = Cookie(None)
 ) -> dict:
+    # Debug incoming tokens
+    print(f"VERIFY TOKEN: access_token_cookie={access_token}, authorization_header={authorization}", flush=True)
+    
     # First try to get token from HttpOnly cookie
     token = access_token
     
@@ -18,6 +21,7 @@ async def verify_token(
             token = header_token
     
     if not token:
+        print("VERIFY TOKEN: No token found in cookies or authorization header", flush=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Missing authentication credentials"

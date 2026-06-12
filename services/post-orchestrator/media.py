@@ -179,12 +179,14 @@ def get_presigned_download_url(url: str, expires_in: int = 3600) -> str:
 
 
 def is_image_file(filename: str) -> bool:
-    lower = filename.lower()
+    clean_filename = filename.split("?")[0]
+    lower = clean_filename.lower()
     return any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"])
 
 
 def is_video_file(filename: str) -> bool:
-    lower = filename.lower()
+    clean_filename = filename.split("?")[0]
+    lower = clean_filename.lower()
     return any(lower.endswith(ext) for ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"])
 
 

@@ -9,7 +9,7 @@ import sqlalchemy
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from jose import jwt
-from services.auth_service.db import database, metadata, users
+from services.auth_service.db import database, metadata, users, oauth_states
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("auth-service")
@@ -97,9 +97,10 @@ def create_refresh_token(data: dict):
     return encoded_jwt
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
-    """Set HttpOnly; Secure; SameSite=Lax cookies for auth tokens"""
-    # Determine if we're in development or production
-    is_secure = os.getenv("ENVIRONMENT", "development") != "development"
+    """Set HttpOnly; Secure; SameSite cookies for auth tokens"""
+    BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+    is_secure = BASE_URL.startswith("https://")
+    samesite = "none" if is_secure else "lax"
     
     # Set access token cookie (30 minutes)
     response.set_cookie(
@@ -107,7 +108,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
         value=access_token,
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=samesite,
         max_age=1800,  # 30 minutes
         path="/"
     )
@@ -118,7 +119,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
         value=refresh_token,
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=samesite,
         max_age=5184000,  # 60 days
         path="/"
     )
@@ -310,7 +311,21 @@ async def get_google_auth_url():
     MOCK_MODE = os.getenv("MOCK_MODE", "false")
 
     state = secrets.token_urlsafe(32)
-    is_secure = os.getenv("ENVIRONMENT", "development") != "development"
+    is_secure = BASE_URL.startswith("https://")
+    samesite = "none" if is_secure else "lax"
+
+    # Clean up old states (> 10 minutes)
+    try:
+        cleanup_query = oauth_states.delete().where(
+            oauth_states.c.created_at < datetime.datetime.utcnow() - datetime.timedelta(minutes=10)
+        )
+        await database.execute(cleanup_query)
+        
+        # Store state in DB
+        insert_query = oauth_states.insert().values(state=state)
+        await database.execute(insert_query)
+    except Exception as e:
+        logger.warning(f"Failed to manage oauth_states in database: {e}")
 
     if MOCK_MODE == "true":
         mock_callback_url = f"{BASE_URL}/auth/google/callback?code=mock_google_code&state={state}"
@@ -320,7 +335,7 @@ async def get_google_auth_url():
             value=state,
             httponly=True,
             secure=is_secure,
-            samesite="lax",
+            samesite=samesite,
             max_age=600,
             path="/"
         )
@@ -350,7 +365,7 @@ async def get_google_auth_url():
         value=state,
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=samesite,
         max_age=600,
         path="/"
     )
@@ -362,6 +377,7 @@ async def google_callback(
     state: str = None,
     oauth_state: str = Cookie(None)
 ):
+    from fastapi import Request
     import httpx
     import uuid
     GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -371,8 +387,23 @@ async def google_callback(
     REDIRECT_URI = f"{BASE_URL}/auth/google/callback"
     MOCK_MODE = os.getenv("MOCK_MODE", "false")
 
-    # Verify state parameter to prevent login CSRF
-    if not state or not oauth_state or state != oauth_state:
+    # Verify state parameter to prevent login CSRF (checks database fallback or cookie)
+    db_state_valid = False
+    if state:
+        try:
+            query = oauth_states.select().where(oauth_states.c.state == state)
+            db_state_record = await database.fetch_one(query)
+            if db_state_record:
+                db_state_valid = True
+                # Clean up / delete the one-time state
+                delete_query = oauth_states.delete().where(oauth_states.c.state == state)
+                await database.execute(delete_query)
+        except Exception as e:
+            logger.warning(f"Error checking state in database: {e}")
+
+    cookie_state_valid = bool(state and oauth_state and state == oauth_state)
+
+    if not db_state_valid and not cookie_state_valid:
         logger.error(f"Google OAuth callback: state mismatch. state={state}, oauth_state={oauth_state}")
         response = RedirectResponse(url=f"{FRONTEND_URL}/login?error=Invalid state parameter")
         response.delete_cookie(key="oauth_state", path="/")
