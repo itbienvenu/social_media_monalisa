@@ -19,9 +19,9 @@ docker compose ps
 #     'docker compose ps --format json': a JSON array (Compose v2.20+) and a
 #     stream of newline-delimited JSON objects (older versions).
 UNHEALTHY_SERVICES=$(docker compose ps --format json \
-  | jq -r -s 'flatten | .[] | select(.State != "running") | .Service' || true)
+  | jq -r '[.[]] | .[] | select(.State != "running") | .Service' || true)
 RUNNING_COUNT=$(docker compose ps --format json \
-  | jq -r -s 'flatten | .[] | select(.State == "running") | .Service' | wc -l || echo 0)
+  | jq -r '[.[]] | .[] | select(.State == "running") | .Service' | wc -l || echo 0)
 
 if [ "$RUNNING_COUNT" -eq 0 ]; then
   echo "❌ No containers are running at all. Build likely failed or containers crashed on startup."
