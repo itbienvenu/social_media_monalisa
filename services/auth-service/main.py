@@ -22,6 +22,12 @@ async def lifespan(app: FastAPI):
     # Init DB
     await connect_db_with_retry(database)
     
+    # Run migrations/alter table for new columns
+    try:
+        await database.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR;")
+    except Exception as e:
+        logger.warning(f"Failed to add full_name column to users: {e}")
+        
     engine = sqlalchemy.create_engine(str(database.url))
     try:
         metadata.create_all(engine)
@@ -41,6 +47,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 class UserCreate(BaseModel):
     email: str
     password: str
+    full_name: str | None = None
 
 class Token(BaseModel):
     access_token: str
@@ -50,6 +57,7 @@ class Token(BaseModel):
 class UserProfile(BaseModel):
     id: str
     email: str
+    full_name: str | None = None
 
 import hashlib
 
@@ -147,11 +155,12 @@ async def register(user: UserCreate):
             id=user_id,
             email=user.email,
             hashed_password=hashed_pw,
-            is_active=True
+            is_active=True,
+            full_name=user.full_name
         )
         await database.execute(query)
         logger.info(f"User registered successfully: {user.email}")
-        return {"id": user_id, "email": user.email}
+        return {"id": user_id, "email": user.email, "full_name": user.full_name}
     except HTTPException:
         raise
     except Exception as e:
@@ -224,7 +233,11 @@ async def read_users_me(token: str):
     user = await database.fetch_one(query)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"id": user['id'], "email": user['email']}
+    return {
+        "id": user['id'],
+        "email": user['email'],
+        "full_name": user['full_name'] if 'full_name' in user else None
+    }
 
 class RefreshRequest(BaseModel):
     refresh_token: str
@@ -410,9 +423,11 @@ async def google_callback(
         return response
 
     email = None
+    google_name = None
 
     if MOCK_MODE == "true":
         email = "mock_google_user@example.com"
+        google_name = "Mock Google User"
         logger.info(f"Mocking Google Auth Callback for email: {email}")
     else:
         if code == "mock_google_code":
@@ -447,6 +462,7 @@ async def google_callback(
                 userinfo_resp.raise_for_status()
                 userinfo = userinfo_resp.json()
                 email = userinfo.get("email")
+                google_name = userinfo.get("name")
             except Exception as e:
                 logger.error(f"Failed to complete Google OAuth exchange: {e}")
                 response = RedirectResponse(url=f"{FRONTEND_URL}/login?error=Google auth failed")
@@ -472,7 +488,8 @@ async def google_callback(
             id=user_id,
             email=email,
             hashed_password=hashed_pw,
-            is_active=True
+            is_active=True,
+            full_name=google_name
         )
         await database.execute(insert_query)
         logger.info(f"New user registered via Google: {email}")

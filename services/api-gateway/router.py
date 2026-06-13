@@ -238,6 +238,29 @@ async def get_facebook_targets(
 
 # --- Auth Proxy ---
 
+@router.get("/auth/me")
+async def get_me_proxy(request: Request, user_info: dict = Depends(verify_token)):
+    token = request.cookies.get("access_token")
+    if not token:
+        authorization = request.headers.get("Authorization")
+        if authorization:
+            scheme, _, header_token = authorization.partition(" ")
+            if scheme.lower() == "bearer":
+                token = header_token
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+        
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(f"{AUTH_SERVICE_URL}/me", params={"token": token})
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/auth/register")
 async def register_proxy(request: Request):
     async with httpx.AsyncClient() as client:

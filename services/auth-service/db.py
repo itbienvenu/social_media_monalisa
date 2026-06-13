@@ -30,6 +30,7 @@ users = sqlalchemy.Table(
     sqlalchemy.Column("email", sqlalchemy.String, unique=True, index=True),
     sqlalchemy.Column("hashed_password", sqlalchemy.String),
     sqlalchemy.Column("is_active", sqlalchemy.Boolean, default=True),
+    sqlalchemy.Column("full_name", sqlalchemy.String, nullable=True),
 )
 
 oauth_states = sqlalchemy.Table(
