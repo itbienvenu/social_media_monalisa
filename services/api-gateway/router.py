@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Header, Response
 from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse
 from libs.common.auth import verify_token
-from libs.common.serializers import PostCreate, PostResponse
+from libs.common.serializers import PostCreate, PostResponse, PostUpdate
 import httpx
 import os
 
@@ -600,8 +600,7 @@ async def platform_callback(platform: str, code: str, state: str):
 
 from pydantic import BaseModel
 
-class PostUpdatePayload(BaseModel):
-    content: str
+PostUpdatePayload = PostUpdate
 
 @router.delete("/posts/{post_id}")
 async def delete_post(post_id: str, user_info: dict = Depends(verify_token)):

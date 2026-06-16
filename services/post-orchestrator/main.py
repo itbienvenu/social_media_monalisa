@@ -956,7 +956,12 @@ async def get_post(post_id: uuid.UUID):
         is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
-        updated_at=post['updated_at']
+        updated_at=post['updated_at'],
+        scheduled_at=post['scheduled_at'],
+        timezone=post['timezone'],
+        scheduler_status=post['scheduler_status'],
+        retry_count=post['retry_count'],
+        last_attempt_at=post['last_attempt_at']
     )
 
 @app.get("/posts/{post_id}/logs")
@@ -1022,7 +1027,12 @@ async def list_posts(user_id: str):
             is_reel=p['is_reel'],
             status=PostStatus(p['status']),
             created_at=p['created_at'],
-            updated_at=p['updated_at'] or p['created_at'] or datetime.utcnow()
+            updated_at=p['updated_at'] or p['created_at'] or datetime.utcnow(),
+            scheduled_at=p['scheduled_at'],
+            timezone=p['timezone'],
+            scheduler_status=p['scheduler_status'],
+            retry_count=p['retry_count'],
+            last_attempt_at=p['last_attempt_at']
         ))
     return results
 

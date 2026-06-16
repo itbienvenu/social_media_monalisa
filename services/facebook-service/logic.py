@@ -382,7 +382,7 @@ class FacebookClient:
                     break
             
             if response is None:
-                raise httpx.HTTPStatusError("No response received", request=None, response=None)
+                raise RuntimeError("No response received from Facebook API")
             response.raise_for_status()
             data = response.json()
             
@@ -452,7 +452,8 @@ class FacebookClient:
                 "permalink": permalink
             }
         except httpx.HTTPStatusError as e:
-            logger.error(f"Facebook API Error fetching post metrics: {e.response.text}")
+            err_msg = e.response.text if e.response is not None else str(e)
+            logger.error(f"Facebook API Error fetching post metrics: {err_msg}")
             if "mock" in self.access_token:
                  return {
                      "likes": 42,
