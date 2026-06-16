@@ -29,6 +29,8 @@ class PostBase(BaseModel):
     music_volume: Optional[float] = 0.2
     video_volume: Optional[float] = 1.0
     slideshow_duration: Optional[int] = 10
+    scheduled_at: Optional[datetime] = None
+    timezone: Optional[str] = "UTC"
 
     @field_validator("media_keys")
     @classmethod
@@ -43,11 +45,19 @@ class PostBase(BaseModel):
 class PostCreate(PostBase):
     pass
 
+class PostUpdate(BaseModel):
+    content: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+    timezone: Optional[str] = None
+
 class PostResponse(PostBase):
     id: uuid.UUID
     status: PostStatus
     created_at: datetime
     updated_at: datetime
+    scheduler_status: Optional[str] = None
+    retry_count: Optional[int] = 0
+    last_attempt_at: Optional[datetime] = None
     
     model_config = ConfigDict(from_attributes=True)
 

@@ -134,6 +134,11 @@ export default function PostPage() {
     const [previewPlatformTab, setPreviewPlatformTab] = useState<string>('instagram');
     const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
 
+    // Scheduling States
+    const [isScheduled, setIsScheduled] = useState(false);
+    const [scheduledAt, setScheduledAt] = useState('');
+    const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
@@ -418,12 +423,22 @@ export default function PostPage() {
                 finalAudioUrl = await uploadFile(audioFile);
             }
 
+            if (isScheduled) {
+                if (!scheduledAt) {
+                    throw new Error("Please select a date and time to schedule the post.");
+                }
+                const schedTime = new Date(scheduledAt).getTime();
+                if (schedTime <= Date.now()) {
+                    throw new Error("Scheduled time must be in the future.");
+                }
+            }
+
             const hasMedia = finalMediaUrls.length > 0 || mediaUrl;
             if ((platforms.includes('tiktok') || platforms.includes('instagram')) && !hasMedia) {
                 throw new Error("Media is required for TikTok or Instagram!");
             }
 
-            setMessage('Publishing post...');
+            setMessage(isScheduled ? 'Scheduling post...' : 'Publishing post...');
             const res = await apiFetch(`${API_URL}/posts`, {
                 method: 'POST',
                 headers: {
@@ -439,7 +454,9 @@ export default function PostPage() {
                     audio_key: finalAudioUrl || undefined,
                     music_volume: musicVolume,
                     video_volume: videoVolume,
-                    slideshow_duration: slideshowDuration
+                    slideshow_duration: slideshowDuration,
+                    scheduled_at: isScheduled && scheduledAt ? scheduledAt : undefined,
+                    timezone: isScheduled ? timezone : undefined
                 })
             });
 
@@ -449,11 +466,11 @@ export default function PostPage() {
                 setUploadProgress(100);
                 
                 if (data.status === 'processing' && data.job_id) {
-                    setMessage(`Processing media... This may take a moment.`);
+                    setMessage(isScheduled ? `Processing media for scheduling...` : `Processing media... This may take a moment.`);
                     
                     const pollJobStatus = async (jobId: string, attempts = 0) => {
                         if (attempts >= 60) {
-                            setMessage(`Processing taking longer than expected. Post ID: ${data.id}`);
+                            setMessage(isScheduled ? `Scheduling processed but took longer than expected.` : `Processing taking longer than expected. Post ID: ${data.id}`);
                             setTimeout(() => {
                                 window.location.href = '/dashboard';
                             }, 2000);
@@ -465,11 +482,14 @@ export default function PostPage() {
                             if (jobRes.ok) {
                                 const jobData = await jobRes.json();
                                 if (jobData.status === 'completed' || jobData.status === 'failed') {
-                                    setMessage(`Success! Post ID: ${data.id}`);
+                                    setMessage(isScheduled ? `Success! Post scheduled.` : `Success! Post ID: ${data.id}`);
                                     setContent('');
+                                    setTitle('');
                                     setPlatforms([]);
                                     setSelectedFiles([]);
                                     setMediaUrl('');
+                                    setIsScheduled(false);
+                                    setScheduledAt('');
                                     setTimeout(() => {
                                         window.location.href = '/dashboard';
                                     }, 1500);
@@ -477,14 +497,14 @@ export default function PostPage() {
                                     setTimeout(() => pollJobStatus(jobId, attempts + 1), 5000);
                                 }
                             } else {
-                                setMessage(`Success! Post ID: ${data.id}`);
+                                setMessage(isScheduled ? `Success! Post scheduled.` : `Success! Post ID: ${data.id}`);
                                 setTimeout(() => {
                                     window.location.href = '/dashboard';
                                 }, 1500);
                             }
                         } catch (e) {
                             console.error('Error polling job status:', e);
-                            setMessage(`Success! Post ID: ${data.id}`);
+                            setMessage(isScheduled ? `Success! Post scheduled.` : `Success! Post ID: ${data.id}`);
                             setTimeout(() => {
                                 window.location.href = '/dashboard';
                             }, 1500);
@@ -493,11 +513,14 @@ export default function PostPage() {
                     
                     pollJobStatus(data.job_id);
                 } else {
-                    setMessage(`Success! Post ID: ${data.id}`);
+                    setMessage(isScheduled ? `Success! Post scheduled.` : `Success! Post ID: ${data.id}`);
                     setContent('');
+                    setTitle('');
                     setPlatforms([]);
                     setSelectedFiles([]);
                     setMediaUrl('');
+                    setIsScheduled(false);
+                    setScheduledAt('');
                     setTimeout(() => {
                         window.location.href = '/dashboard';
                     }, 1500);
@@ -675,14 +698,14 @@ export default function PostPage() {
                                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                         </svg>
-                                        <span>Publishing {uploadProgress > 0 && `(${uploadProgress}%)`}</span>
+                                        <span>{isScheduled ? 'Scheduling' : 'Publishing'} {uploadProgress > 0 && `(${uploadProgress}%)`}</span>
                                     </>
                                 ) : (
                                     <>
                                         <svg className="w-3.5 h-3.5 inline-block text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                                             <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                                         </svg>
-                                        <span>Publish Now</span>
+                                        <span>{isScheduled ? 'Schedule Post' : 'Publish Now'}</span>
                                     </>
                                 )}
                             </button>
@@ -738,6 +761,74 @@ export default function PostPage() {
                                                 </button>
                                             );
                                         })}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Post Scheduling Card */}
+                            <div className="bg-white border border-gray-150 p-6 rounded-2xl shadow-sm space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <h3 className="text-xs font-black uppercase tracking-wider text-gray-400">
+                                            Post Scheduling
+                                        </h3>
+                                        <p className="text-[10px] text-gray-400 font-semibold mt-0.5">
+                                            Schedule this post for later instead of publishing immediately
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsScheduled(!isScheduled)}
+                                            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                                isScheduled ? 'bg-[#FF4747]' : 'bg-gray-200'
+                                            }`}
+                                        >
+                                            <span
+                                                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                                    isScheduled ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                            />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {isScheduled && (
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 animate-fadeIn">
+                                        <div>
+                                            <label className="block text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1.5">
+                                                Scheduled Date & Time
+                                            </label>
+                                            <input
+                                                type="datetime-local"
+                                                required={isScheduled}
+                                                value={scheduledAt}
+                                                onChange={e => setScheduledAt(e.target.value)}
+                                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-[#FF4747]/10 focus:border-[#FF4747] text-xs font-semibold text-gray-700 bg-slate-50/20"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1.5">
+                                                Timezone
+                                            </label>
+                                            <select
+                                                value={timezone}
+                                                onChange={e => setTimezone(e.target.value)}
+                                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-[#FF4747]/10 focus:border-[#FF4747] text-xs font-semibold text-gray-700 bg-white"
+                                            >
+                                                <option value="UTC">UTC (GMT+0)</option>
+                                                <option value="America/New_York">Eastern Time (ET)</option>
+                                                <option value="America/Chicago">Central Time (CT)</option>
+                                                <option value="America/Denver">Mountain Time (MT)</option>
+                                                <option value="America/Los_Angeles">Pacific Time (PT)</option>
+                                                <option value="Europe/London">London (GMT/BST)</option>
+                                                <option value="Europe/Paris">Paris (CET/CEST)</option>
+                                                <option value="Africa/Kigali">Kigali (CAT)</option>
+                                                <option value="Asia/Tokyo">Tokyo (JST)</option>
+                                                <option value="Asia/Kolkata">India (IST)</option>
+                                                <option value="Australia/Sydney">Sydney (AEST)</option>
+                                            </select>
+                                        </div>
                                     </div>
                                 )}
                             </div>

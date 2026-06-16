@@ -9,6 +9,7 @@ router = APIRouter()
 
 POST_ORCHESTRATOR_URL = "http://post-orchestrator:8000"
 AUTH_SERVICE_URL = "http://auth-service:8000"
+ANALYTICS_API_URL = "http://analytics-api:8000"
 
 
 @router.post("/posts", response_model=PostResponse)
@@ -638,3 +639,59 @@ async def update_post(post_id: str, payload: PostUpdatePayload, user_info: dict 
              raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
         except httpx.HTTPStatusError as exc:
              raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
+# --- Analytics Proxies ---
+
+@router.get("/analytics/summary")
+async def get_analytics_summary(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{ANALYTICS_API_URL}/analytics/summary", params={"user_id": user_id})
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+@router.get("/analytics/content-performance")
+async def get_analytics_content_performance(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{ANALYTICS_API_URL}/analytics/content-performance", params={"user_id": user_id})
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+@router.get("/analytics/peak-times")
+async def get_analytics_peak_times(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{ANALYTICS_API_URL}/analytics/peak-times", params={"user_id": user_id})
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+@router.get("/analytics/trends")
+async def get_analytics_trends(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{ANALYTICS_API_URL}/analytics/trends", params={"user_id": user_id})
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+

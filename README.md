@@ -81,3 +81,26 @@ The following events are recorded in the shared database `post_logs` table:
 *   **`posting_to_platform`**: The worker is calling the external social media Graph API.
 *   **`platform_success` / `post_success`**: The post was successfully created on the platform.
 *   **`platform_failed` / `post_failed`**: The posting process failed (includes the error details/reason).
+
+## Post Scheduling System
+
+A timezone-aware scheduling system has been integrated into the post orchestrator service, enabling future publication, rescheduling, cancellation, and background execution.
+
+### Database Additions
+*   `scheduled_at`: The datetime (UTC) when the post is scheduled to run.
+*   `timezone`: The original user's local timezone (e.g. `US/Eastern`).
+*   `scheduler_status`: The status of scheduling (`scheduled`, `publishing`, `published`, `cancelled`).
+*   `retry_count`: Tracks retries in case of transient failures (max 3).
+*   `last_attempt_at`: Timestamp of the last execution attempt.
+
+### API Endpoints
+1.  **Schedule a Post**:
+    *   `POST /posts?user_id={id}`: Provide `"scheduled_at": "YYYY-MM-DDTHH:MM:SSZ"` and `"timezone": "Europe/London"` in the body.
+2.  **Cancel a Post**:
+    *   `POST /posts/{post_id}/cancel`: Sets scheduler status to `cancelled` and status to `failed`.
+3.  **Reschedule/Edit a Post**:
+    *   `PUT /posts/{post_id}`: Reschedule a cancelled/failed/scheduled post to a new time and update its content/timezone.
+
+### Background Worker
+An ARQ worker runs a cron job (`check_scheduled_posts`) every minute to pick up due posts, publish them via RabbitMQ, handle retries with an exponential/fixed delay, and emit warning notifications for users in case of retries or failures.
+

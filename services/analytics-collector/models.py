@@ -1,6 +1,6 @@
 import databases
 import sqlalchemy
-from sqlalchemy import Table, Column, String, Integer, DateTime, ForeignKey
+from sqlalchemy import Table, Column, String, Integer, DateTime, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 import os
 import uuid
@@ -22,6 +22,23 @@ database = databases.Database(DATABASE_URL)
 
 metadata = sqlalchemy.MetaData()
 
+# Definition of posts table for querying active posts to collect stats for
+Post = Table(
+    "posts",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("content", String),
+    Column("media_key", String, nullable=True),
+    Column("media_keys", String, nullable=True),
+    Column("is_reel", Boolean, default=False),
+    Column("status", String),
+    Column("user_id", String, index=True, nullable=True),
+    Column("created_at", DateTime, default=datetime.datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.datetime.utcnow),
+    Column("external_id", String, nullable=True, index=True),
+    Column("platform", String, nullable=True),
+)
+
 AnalyticsSnapshot = Table(
     "analytics_snapshots",
     metadata,
@@ -34,3 +51,4 @@ AnalyticsSnapshot = Table(
     Column("views", Integer, default=0),
     Column("timestamp", DateTime, default=datetime.datetime.utcnow),
 )
+
