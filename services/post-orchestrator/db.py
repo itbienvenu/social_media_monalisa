@@ -44,6 +44,13 @@ Post = Table(
     Column("platform", String, nullable=True),
     # New column for background job tracking
     Column("job_id", String, nullable=True, index=True),
+    # New columns for post scheduling
+    Column("scheduled_at", DateTime, nullable=True),
+    Column("timezone", String, nullable=True),
+    Column("scheduler_status", String, nullable=True),
+    Column("retry_count", sqlalchemy.Integer, default=0, server_default="0"),
+    Column("last_attempt_at", DateTime, nullable=True),
+    Column("facebook_page_id", String, nullable=True),
     UniqueConstraint("user_id", "platform", "external_id", name="uq_user_platform_external_post"),
 )
 
@@ -79,4 +86,17 @@ Notification = Table(
     Column("type", String),  # e.g., 'success', 'error', 'info'
     Column("read", sqlalchemy.Boolean, default=False, server_default="false"),
     Column("created_at", DateTime, default=datetime.datetime.utcnow),
+)
+
+AnalyticsSnapshot = Table(
+    "analytics_snapshots",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("post_id", UUID(as_uuid=True), index=True),
+    Column("platform", String),
+    Column("likes", sqlalchemy.Integer, default=0),
+    Column("shares", sqlalchemy.Integer, default=0),
+    Column("comments", sqlalchemy.Integer, default=0),
+    Column("views", sqlalchemy.Integer, default=0),
+    Column("timestamp", DateTime, default=datetime.datetime.utcnow),
 )

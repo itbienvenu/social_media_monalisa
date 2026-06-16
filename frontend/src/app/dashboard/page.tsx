@@ -170,12 +170,47 @@ function DashboardContent() {
     const [editContent, setEditContent] = useState("");
     const [editLoading, setEditLoading] = useState(false);
 
+    // Advanced Analytics States
+    const [analyticsSummary, setAnalyticsSummary] = useState<any>(null);
+    const [contentPerformance, setContentPerformance] = useState<any[]>([]);
+    const [peakTimes, setPeakTimes] = useState<any[]>([]);
+    const [historicalTrends, setHistoricalTrends] = useState<any[]>([]);
+    const [analyticsLoading, setAnalyticsLoading] = useState<boolean>(false);
+
+    const fetchAnalytics = async () => {
+        setAnalyticsLoading(true);
+        try {
+            const [summaryRes, perfRes, peakRes, trendRes] = await Promise.all([
+                apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/analytics/summary`),
+                apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/analytics/content-performance`),
+                apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/analytics/peak-times`),
+                apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/analytics/trends`)
+            ]);
+
+            if (summaryRes.ok) setAnalyticsSummary(await summaryRes.json());
+            if (perfRes.ok) setContentPerformance(await perfRes.json());
+            if (peakRes.ok) setPeakTimes(await peakRes.json());
+            if (trendRes.ok) setHistoricalTrends(await trendRes.json());
+        } catch (e) {
+            console.error("Error fetching analytics:", e);
+        } finally {
+            setAnalyticsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (activeSidebarTab === 'analytics') {
+            fetchAnalytics();
+        }
+    }, [activeSidebarTab]);
+
     useEffect(() => {
         const fetchData = async () => {
             try {
                 const [connRes, postsRes, notifRes, profileRes] = await Promise.all([
                     apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/connections`),
                     apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`),
+
                     apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/notifications`),
                     apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/me`)
                 ]);
@@ -334,12 +369,14 @@ function DashboardContent() {
             });
             const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/posts`);
             if (res.ok) setPosts(await res.json());
+            await fetchAnalytics();
         } catch (e) {
             console.error(e);
         } finally {
             setSyncLoading(false);
         }
     };
+
 
     const handleViewMetrics = async (post: any) => {
         setActiveMetricsPost(post);
@@ -802,20 +839,20 @@ function DashboardContent() {
                 {activeSidebarTab === 'analytics' && (
                     <div className="space-y-6 animate-fadeIn">
                         {/* Title and Sync controls */}
-                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-gray-200/50 pb-5">
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-gray-200/60 pb-5">
                             <div>
                                 <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight mb-1">
                                     Analytics & Activity Feed
                                 </h1>
-                                <p className="text-sm text-gray-500 font-semibold">
-                                    Track published metrics and update content schedules.
+                                <p className="text-sm text-gray-600 font-medium">
+                                    Track published metrics and update content schedules across all channels.
                                 </p>
                             </div>
                             <div className="flex gap-2">
                                 <button
                                     onClick={handleSync}
                                     disabled={syncLoading}
-                                    className="text-xs bg-white border border-gray-200 text-gray-700 px-4 py-2.5 rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50 flex items-center gap-2 font-bold cursor-pointer"
+                                    className="text-xs bg-white border border-gray-200 text-gray-700 px-4 py-2.5 rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50 flex items-center gap-2 font-bold cursor-pointer shadow-sm"
                                 >
                                     {syncLoading ? (
                                         <svg className="animate-spin h-4 w-4 text-gray-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -827,12 +864,279 @@ function DashboardContent() {
                                 </button>
                                 <button 
                                     onClick={() => router.push('/post')}
-                                    className="text-xs bg-[#FF4747] hover:bg-[#e03e3e] text-white px-4 py-2.5 rounded-xl transition-all font-bold cursor-pointer"
+                                    className="text-xs bg-[#FF4747] hover:bg-[#e03e3e] text-white px-4 py-2.5 rounded-xl transition-all font-bold cursor-pointer shadow-sm"
                                 >
                                     Create Post
                                 </button>
                             </div>
                         </div>
+
+                        {/* ADVANCED DEEP ANALYTICS BOARD */}
+                        {analyticsLoading ? (
+                            <div className="flex justify-center items-center py-12">
+                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#FF4747]"></div>
+                            </div>
+                        ) : (
+                            <div className="space-y-6">
+                                {/* Row 1: Summary Cards */}
+                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                    <div className="bg-white border border-gray-200/80 p-5 rounded-2xl shadow-sm hover:shadow-md transition duration-200 border-t-4 border-t-blue-500">
+                                        <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1">Total Views / Reach</p>
+                                        <p className="text-3xl font-black text-gray-900">{analyticsSummary?.total_views?.toLocaleString() || 0}</p>
+                                        <div className="text-[11px] text-gray-600 mt-1.5 font-medium flex items-center gap-1">
+                                            <span>🌐</span> across all channels
+                                        </div>
+                                    </div>
+                                    <div className="bg-white border border-gray-200/80 p-5 rounded-2xl shadow-sm hover:shadow-md transition duration-200 border-t-4 border-t-rose-500">
+                                        <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1">Likes & Reactions</p>
+                                        <p className="text-3xl font-black text-gray-900">{analyticsSummary?.total_likes?.toLocaleString() || 0}</p>
+                                        <div className="text-[11px] text-rose-600 mt-1.5 font-semibold flex items-center gap-1">
+                                            <span>❤️</span> engagement rate
+                                        </div>
+                                    </div>
+                                    <div className="bg-white border border-gray-200/80 p-5 rounded-2xl shadow-sm hover:shadow-md transition duration-200 border-t-4 border-t-indigo-500">
+                                        <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1">Comments</p>
+                                        <p className="text-3xl font-black text-gray-900">{analyticsSummary?.total_comments?.toLocaleString() || 0}</p>
+                                        <div className="text-[11px] text-indigo-600 mt-1.5 font-semibold flex items-center gap-1">
+                                            <span>💬</span> conversations
+                                        </div>
+                                    </div>
+                                    <div className="bg-white border border-gray-200/80 p-5 rounded-2xl shadow-sm hover:shadow-md transition duration-200 border-t-4 border-t-violet-500">
+                                        <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1">Shares & Reposts</p>
+                                        <p className="text-3xl font-black text-gray-900">{analyticsSummary?.total_shares?.toLocaleString() || 0}</p>
+                                        <div className="text-[11px] text-violet-600 mt-1.5 font-semibold flex items-center gap-1">
+                                            <span>🔁</span> organic distribution
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Row 2: Charts Grid */}
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                    {/* Left: Trend Line Chart */}
+                                    <div className="bg-white border border-gray-200/80 p-6 rounded-2xl shadow-sm">
+                                        <h3 className="text-sm font-extrabold text-gray-900 mb-1 uppercase tracking-wider">Engagement Trend (Last 30 Days)</h3>
+                                        <p className="text-xs text-gray-500 font-medium mb-5">Total interactions (likes, comments, shares) captured daily</p>
+                                        
+                                        {historicalTrends && historicalTrends.length > 1 ? (
+                                            <div className="w-full flex gap-3">
+                                                {/* Y-Axis Labels */}
+                                                {(() => {
+                                                    const maxVal = Math.max(...historicalTrends.map((t: any) => t.likes + t.comments + t.shares), 10);
+                                                    return (
+                                                        <div className="flex flex-col justify-between text-[10px] text-gray-500 font-bold h-40 pb-6 shrink-0 w-8 text-right select-none">
+                                                            <span>{maxVal.toLocaleString()}</span>
+                                                            <span>{Math.round(maxVal / 2).toLocaleString()}</span>
+                                                            <span>0</span>
+                                                        </div>
+                                                    );
+                                                })()}
+                                                
+                                                <div className="w-full">
+                                                    <svg className="w-full h-40 overflow-visible" viewBox="0 0 500 150" preserveAspectRatio="none">
+                                                        <defs>
+                                                            <linearGradient id="chart-gradient" x1="0" y1="0" x2="0" y2="1">
+                                                                <stop offset="0%" stopColor="#FF4747" stopOpacity="0.2" />
+                                                                <stop offset="100%" stopColor="#FF4747" stopOpacity="0.0" />
+                                                            </linearGradient>
+                                                        </defs>
+                                                        {/* Grid lines */}
+                                                        <line x1="0" y1="10" x2="500" y2="10" stroke="#f1f5f9" strokeWidth="1" strokeDasharray="3,3" />
+                                                        <line x1="0" y1="75" x2="500" y2="75" stroke="#f1f5f9" strokeWidth="1" strokeDasharray="3,3" />
+                                                        <line x1="0" y1="140" x2="500" y2="140" stroke="#e2e8f0" strokeWidth="1" />
+                                                        
+                                                        {/* SVG line and path */}
+                                                        {(() => {
+                                                            const paddingY = 10;
+                                                            const width = 500;
+                                                            const height = 150;
+                                                            const maxVal = Math.max(...historicalTrends.map((t: any) => t.likes + t.comments + t.shares), 10);
+                                                            const points = historicalTrends.map((t: any, index: number) => {
+                                                                const x = (index / (historicalTrends.length - 1 || 1)) * width;
+                                                                const y = height - paddingY - ((t.likes + t.comments + t.shares) / maxVal) * (height - 2 * paddingY);
+                                                                return { x, y, val: t.likes + t.comments + t.shares };
+                                                            });
+                                                            
+                                                            const linePointsStr = points.map(p => `${p.x},${p.y}`).join(" ");
+                                                            const fillPointsStr = `0,140 ${linePointsStr} 500,140`;
+                                                            
+                                                            return (
+                                                                <>
+                                                                    <polygon points={fillPointsStr} fill="url(#chart-gradient)" />
+                                                                    <polyline points={linePointsStr} fill="none" stroke="#FF4747" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+                                                                    {points.map((p, idx) => (
+                                                                        <g key={idx} className="group">
+                                                                            <circle cx={p.x} cy={p.y} r="4.5" fill="white" stroke="#FF4747" strokeWidth="3" className="transition-all duration-150 cursor-pointer hover:r-6" />
+                                                                            <title>{`Engagement: ${p.val}`}</title>
+                                                                        </g>
+                                                                    ))}
+                                                                </>
+                                                            );
+                                                        })()}
+                                                    </svg>
+                                                    <div className="flex justify-between text-[10px] text-gray-500 font-extrabold uppercase mt-2 select-none">
+                                                        <span>{historicalTrends[0]?.date}</span>
+                                                        <span>{historicalTrends[Math.floor(historicalTrends.length / 2)]?.date}</span>
+                                                        <span>{historicalTrends[historicalTrends.length - 1]?.date}</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="h-40 flex items-center justify-center border border-dashed border-gray-200 rounded-xl bg-gray-50/50">
+                                                <p className="text-gray-550 font-semibold text-xs">Accumulating timeline trends... check back tomorrow.</p>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Right: Content Format Comparison */}
+                                    <div className="bg-white border border-gray-200/80 p-6 rounded-2xl shadow-sm">
+                                        <h3 className="text-sm font-extrabold text-gray-900 mb-1 uppercase tracking-wider">Content Format Breakdown</h3>
+                                        <p className="text-xs text-gray-500 font-medium mb-5">Compare average views and engagement by post type</p>
+                                        
+                                        {contentPerformance && contentPerformance.length > 0 ? (
+                                            <div className="space-y-5 py-1">
+                                                {contentPerformance.map((perf, idx) => {
+                                                    const maxLikes = Math.max(...contentPerformance.map(p => p.avg_likes), 1);
+                                                    const maxViews = Math.max(...contentPerformance.map(p => p.avg_views), 1);
+                                                    const likesPercent = (perf.avg_likes / maxLikes) * 100;
+                                                    const viewsPercent = (perf.avg_views / maxViews) * 100;
+                                                    
+                                                    return (
+                                                        <div key={idx} className="space-y-2 p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                                                            <div className="flex justify-between items-center">
+                                                                <span className="text-xs font-black text-gray-800 uppercase tracking-wide flex items-center gap-1.5">
+                                                                    <span className={perf.format.toLowerCase() === 'reels' ? 'text-indigo-500' : 'text-blue-500'}>
+                                                                        {perf.format.toLowerCase() === 'reels' ? '🎬' : '📝'}
+                                                                    </span>
+                                                                    {perf.format}
+                                                                </span>
+                                                                <span className="text-[10px] text-gray-650 font-bold bg-white px-2 py-0.5 rounded-md border border-gray-200/50">{perf.post_count} posts</span>
+                                                            </div>
+                                                            {/* Views progress bar */}
+                                                            <div className="space-y-1">
+                                                                <div className="flex justify-between text-[10px] text-gray-600 font-semibold">
+                                                                    <span>Avg Views</span>
+                                                                    <span className="font-bold text-gray-900">{Math.round(perf.avg_views).toLocaleString()}</span>
+                                                                </div>
+                                                                <div className="w-full bg-gray-200 h-2.5 rounded-full overflow-hidden">
+                                                                    <div className="bg-gradient-to-r from-blue-500 to-indigo-500 h-full rounded-full transition-all duration-500" style={{ width: `${viewsPercent}%` }} />
+                                                                </div>
+                                                            </div>
+                                                            {/* Likes progress bar */}
+                                                            <div className="space-y-1">
+                                                                <div className="flex justify-between text-[10px] text-gray-600 font-semibold">
+                                                                    <span>Avg Likes</span>
+                                                                    <span className="font-bold text-gray-900">{Math.round(perf.avg_likes).toLocaleString()}</span>
+                                                                </div>
+                                                                <div className="w-full bg-gray-200 h-2.5 rounded-full overflow-hidden">
+                                                                    <div className="bg-[#FF4747] h-full rounded-full transition-all duration-500" style={{ width: `${likesPercent}%` }} />
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <div className="h-40 flex items-center justify-center border border-dashed border-gray-200 rounded-xl bg-gray-50/50">
+                                                <p className="text-gray-550 font-semibold text-xs">No format comparison data. Post more Reels and Standard posts to unlock.</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Row 3: Optimal Posting Times Heatmap */}
+                                <div className="bg-white border border-gray-200/80 p-6 rounded-2xl shadow-sm">
+                                    <div className="flex justify-between items-start mb-2">
+                                        <div>
+                                            <h3 className="text-sm font-extrabold text-gray-900 uppercase tracking-wider">Optimal Posting Heatmap</h3>
+                                            <p className="text-xs text-gray-500 font-medium">Identify the best hour of the day and day of the week to post content (based on average engagement rate)</p>
+                                        </div>
+                                    </div>
+                                    
+                                    {peakTimes && peakTimes.length > 0 ? (
+                                        <div className="mt-6 overflow-x-auto pb-2">
+                                            <div className="min-w-[750px] space-y-2.5 pr-2">
+                                                {/* Hour indicators header aligned perfectly */}
+                                                <div 
+                                                    className="grid items-center text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1"
+                                                    style={{ gridTemplateColumns: '80px 1fr' }}
+                                                >
+                                                    <div className="text-left font-black text-gray-800">Day / Hour</div>
+                                                    <div 
+                                                        className="grid gap-1.5 text-center font-bold"
+                                                        style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}
+                                                    >
+                                                        {Array.from({ length: 24 }).map((_, h) => (
+                                                            <div key={h} className="text-[10px] text-gray-650 font-bold">{h.toString().padStart(2, '0')}</div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                
+                                                {/* Matrix Rows */}
+                                                {(() => {
+                                                    const DAYS_LABEL = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                                                    const heatmapMatrix = Array(7).fill(0).map(() => Array(24).fill(0));
+                                                    let maxEngagement = 0;
+                                                    peakTimes.forEach((pt: any) => {
+                                                        const d = pt.day_of_week;
+                                                        const h = pt.hour_of_day;
+                                                        heatmapMatrix[d][h] = pt.avg_engagement;
+                                                        if (pt.avg_engagement > maxEngagement) {
+                                                            maxEngagement = pt.avg_engagement;
+                                                        }
+                                                    });
+                                                    
+                                                    return heatmapMatrix.map((rowArr, d) => (
+                                                        <div 
+                                                            key={d} 
+                                                            className="grid items-center"
+                                                            style={{ gridTemplateColumns: '80px 1fr' }}
+                                                        >
+                                                            <div className="text-xs font-extrabold text-gray-800">{DAYS_LABEL[d]}</div>
+                                                            <div 
+                                                                className="grid gap-1.5"
+                                                                style={{ gridTemplateColumns: 'repeat(24, minmax(0, 1fr))' }}
+                                                            >
+                                                                {rowArr.map((val, h) => {
+                                                                    const percent = maxEngagement > 0 ? val / maxEngagement : 0;
+                                                                    const backgroundColor = val > 0 
+                                                                        ? `rgba(255, 71, 71, ${0.12 + percent * 0.88})` 
+                                                                        : 'rgba(241, 245, 249, 0.7)';
+                                                                    const title = val > 0 
+                                                                        ? `${DAYS_LABEL[d]} at ${h.toString().padStart(2, '0')}:00\nAverage Engagement score: ${Math.round(val)}`
+                                                                        : `${DAYS_LABEL[d]} at ${h.toString().padStart(2, '0')}:00\nNo post data`;
+                                                                    return (
+                                                                        <div 
+                                                                            key={h} 
+                                                                            className="aspect-square rounded-md border border-white hover:border-gray-500 cursor-pointer transition-all duration-150 hover:scale-110 shadow-sm"
+                                                                            style={{ backgroundColor }}
+                                                                            title={title}
+                                                                        />
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    ));
+                                                })()}
+                                            </div>
+                                            <div className="flex justify-end items-center mt-4 gap-2 text-[10px] font-extrabold uppercase text-gray-500 select-none">
+                                                <span>Less Engaged</span>
+                                                <div className="flex gap-1">
+                                                    <div className="w-4 h-3.5 rounded-[4px] bg-red-100" />
+                                                    <div className="w-4 h-3.5 rounded-[4px] bg-red-300" />
+                                                    <div className="w-4 h-3.5 rounded-[4px] bg-red-500" />
+                                                    <div className="w-4 h-3.5 rounded-[4px] bg-[#FF4747]" />
+                                                </div>
+                                                <span>More Engaged</span>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="h-32 flex items-center justify-center border border-dashed border-gray-200 rounded-xl bg-gray-50/50 mt-4">
+                                            <p className="text-gray-500 font-semibold text-xs">Analyze post metrics over multiple time slots to render your hourly engagement map.</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
 
                         {(!posts || posts.length === 0) ? (
                             <div className="bg-white border border-gray-150 p-12 rounded-2xl text-center shadow-sm">

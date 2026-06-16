@@ -343,19 +343,46 @@ class FacebookClient:
         """
         Fetches metrics (likes/reactions, comments, shares, etc.) for a specific post.
         """
-        # We also query the 'status' field in case platform_post_id is a video node or page post with status
         url = f"{FACEBOOK_GRAPH_URL}/{platform_post_id}"
-        params = {
-            "access_token": self.access_token,
-            "fields": "shares,likes.summary(true).limit(0),comments.summary(true).limit(0),status,permalink_url"
-        }
+        current_fields = ["shares", "likes.summary(true).limit(0)", "comments.summary(true).limit(0)", "status", "permalink_url"]
+        
+        response = None
         try:
             logger.info(f"Fetching metrics for post {platform_post_id} from {url}")
-            response = await self.client.get(url, params=params)
-            if response.status_code == 400 and "shares" in response.text:
-                logger.info(f"Post {platform_post_id} returned 400 for shares. Retrying without shares field.")
-                params["fields"] = "likes.summary(true).limit(0),comments.summary(true).limit(0),status,permalink_url"
+            while current_fields:
+                fields_str = ",".join(current_fields)
+                params = {
+                    "access_token": self.access_token,
+                    "fields": fields_str
+                }
+                logger.info(f"Facebook API request with fields: {fields_str}")
                 response = await self.client.get(url, params=params)
+                if response.status_code == 200:
+                    break
+                elif response.status_code == 400:
+                    err_text = response.text
+                    offending_field = None
+                    if "shares" in err_text:
+                        offending_field = "shares"
+                    elif "status" in err_text:
+                        offending_field = "status"
+                    
+                    if offending_field and offending_field in current_fields:
+                        logger.info(f"Field '{offending_field}' caused 400. Removing and retrying.")
+                        current_fields.remove(offending_field)
+                    else:
+                        # Fallback: remove status first, then shares if needed
+                        if "status" in current_fields:
+                            current_fields.remove("status")
+                        elif "shares" in current_fields:
+                            current_fields.remove("shares")
+                        else:
+                            break
+                else:
+                    break
+            
+            if response is None:
+                raise RuntimeError("No response received from Facebook API")
             response.raise_for_status()
             data = response.json()
             
@@ -425,7 +452,8 @@ class FacebookClient:
                 "permalink": permalink
             }
         except httpx.HTTPStatusError as e:
-            logger.error(f"Facebook API Error fetching post metrics: {e.response.text}")
+            err_msg = e.response.text if e.response is not None else str(e)
+            logger.error(f"Facebook API Error fetching post metrics: {err_msg}")
             if "mock" in self.access_token:
                  return {
                      "likes": 42,

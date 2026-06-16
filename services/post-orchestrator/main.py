@@ -1,12 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from libs.common.serializers import PostCreate, PostResponse, PostStatus, Platform
-from services.post_orchestrator.db import database, Post, PostTarget, PostLog, Notification, metadata
+from libs.common.serializers import PostCreate, PostResponse, PostStatus, Platform, PostUpdate
+from services.post_orchestrator.db import database, Post, PostTarget, PostLog, Notification, AnalyticsSnapshot, metadata
 import sqlalchemy
 import asyncio
 from services.post_orchestrator.media import generate_upload_url, delete_media_files, get_presigned_download_url
 from services.post_orchestrator.events import publish_post_event, mq
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 import json
 import logging
@@ -40,6 +40,12 @@ def make_user_friendly_error(message: str) -> str:
     return message
 
 async def update_post_overall_status(post_uuid: uuid.UUID, cdn_urls: list = None):
+    # Fetch post to see if it is scheduled
+    post_query = Post.select().where(Post.c.id == post_uuid)
+    post = await database.fetch_one(post_query)
+    if not post:
+        return
+        
     # Fetch all targets
     all_targets_query = PostTarget.select().where(PostTarget.c.post_id == post_uuid)
     targets = await database.fetch_all(all_targets_query)
@@ -48,20 +54,29 @@ async def update_post_overall_status(post_uuid: uuid.UUID, cdn_urls: list = None
     if not statuses:
         return
         
+    is_scheduled_flow = post["scheduled_at"] is not None
+        
     if all(s == "published" for s in statuses):
         overall_status = PostStatus.PUBLISHED.value
+        scheduler_status = "published" if is_scheduled_flow else post["scheduler_status"]
     elif all(s == "failed" for s in statuses):
         overall_status = PostStatus.FAILED.value
+        scheduler_status = "failed" if is_scheduled_flow else post["scheduler_status"]
     elif any(s in ("pending", "processing") for s in statuses):
         overall_status = PostStatus.PROCESSING.value
+        scheduler_status = post["scheduler_status"]
     else:
         # Mix of published and failed, and no pending/processing
         overall_status = PostStatus.PARTIAL.value
+        scheduler_status = post["scheduler_status"]
         
     update_vals = {
         "status": overall_status,
         "updated_at": datetime.utcnow()
     }
+    if is_scheduled_flow:
+        update_vals["scheduler_status"] = scheduler_status
+        
     if cdn_urls:
         update_vals["media_key"] = cdn_urls[0]
         update_vals["media_keys"] = json.dumps(cdn_urls)
@@ -69,6 +84,56 @@ async def update_post_overall_status(post_uuid: uuid.UUID, cdn_urls: list = None
     query = Post.update().where(Post.c.id == post_uuid).values(**update_vals)
     await database.execute(query)
     logger.info(f"Updated main post {post_uuid} overall status to {overall_status}")
+    
+    # If all targets finished, and there were failures, trigger scheduling retry if applicable
+    if is_scheduled_flow and not any(s in ("pending", "processing") for s in statuses):
+        has_failed_targets = any(s == "failed" for s in statuses)
+        if has_failed_targets:
+            new_retry_count = (post["retry_count"] or 0) + 1
+            if new_retry_count < 3:
+                # Reschedule retry in 5 minutes (300 seconds)
+                next_attempt = datetime.utcnow() + timedelta(minutes=5)
+                await database.execute(
+                    Post.update().where(Post.c.id == post_uuid).values(
+                        scheduler_status="scheduled",
+                        retry_count=new_retry_count,
+                        scheduled_at=next_attempt,
+                        status=PostStatus.PENDING.value
+                    )
+                )
+                
+                # Reset only the failed targets back to pending so they will be retried
+                await database.execute(
+                    PostTarget.update().where(
+                        (PostTarget.c.post_id == post_uuid) & 
+                        (PostTarget.c.status == "failed")
+                    ).values(status="pending")
+                )
+                
+                await log_post_stage(
+                    database, post_uuid, "orchestrator", "retry_scheduled", "WARNING",
+                    f"Scheduling retry {new_retry_count}/3 at {next_attempt} due to platform failure"
+                )
+                await create_notification(
+                    user_id=post["user_id"],
+                    title="Scheduled post retry",
+                    message=f"Scheduled post failed to publish on some platforms. Retrying failed targets in 5 minutes. (Attempt {new_retry_count}/3)",
+                    notification_type="warning"
+                )
+            else:
+                # Permanent failure
+                await database.execute(
+                    Post.update().where(Post.c.id == post_uuid).values(
+                        scheduler_status="failed",
+                        status=PostStatus.FAILED.value
+                    )
+                )
+                await create_notification(
+                    user_id=post["user_id"],
+                    title="Scheduled post failed permanently",
+                    message=f"Your scheduled post failed permanently after {new_retry_count} attempts.",
+                    notification_type="error"
+                )
 
 async def create_notification(user_id: str, title: str, message: str, notification_type: str):
     try:
@@ -249,6 +314,24 @@ async def lifespan(app: FastAPI):
                 if "job_id" not in columns:
                     conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN job_id VARCHAR"))
                     logger.info("Migrated schema: Added column job_id to posts table")
+                if "scheduled_at" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN scheduled_at TIMESTAMP"))
+                    logger.info("Migrated schema: Added column scheduled_at to posts table")
+                if "timezone" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN timezone VARCHAR"))
+                    logger.info("Migrated schema: Added column timezone to posts table")
+                if "scheduler_status" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN scheduler_status VARCHAR"))
+                    logger.info("Migrated schema: Added column scheduler_status to posts table")
+                if "retry_count" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN retry_count INTEGER DEFAULT 0"))
+                    logger.info("Migrated schema: Added column retry_count to posts table")
+                if "last_attempt_at" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN last_attempt_at TIMESTAMP"))
+                    logger.info("Migrated schema: Added column last_attempt_at to posts table")
+                if "facebook_page_id" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE posts ADD COLUMN facebook_page_id VARCHAR"))
+                    logger.info("Migrated schema: Added column facebook_page_id to posts table")
                 
                 # Check and add unique constraint
                 # uq_user_platform_external_post unique constraint
@@ -319,8 +402,27 @@ app = FastAPI(title="Post Orchestrator", lifespan=lifespan)
 @app.post("/posts", response_model=PostResponse)
 async def create_post(post_data: PostCreate, user_id: str):
     import json
+    import zoneinfo
+    from datetime import timezone as dt_timezone
     from services.post_orchestrator.media import process_and_mix_media
     
+    # Validate scheduled_at if provided
+    sched_utc = None
+    if post_data.scheduled_at:
+        try:
+            tz = zoneinfo.ZoneInfo(post_data.timezone or "UTC")
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid timezone: {post_data.timezone}")
+        
+        sched_dt = post_data.scheduled_at
+        if sched_dt.tzinfo is None:
+            sched_dt = sched_dt.replace(tzinfo=tz)
+        
+        now_utc = datetime.now(dt_timezone.utc)
+        sched_utc = sched_dt.astimezone(dt_timezone.utc)
+        if sched_utc <= now_utc:
+            raise HTTPException(status_code=400, detail="Scheduled time must be in the future")
+
     media_key = post_data.media_key
     media_keys = post_data.media_keys
     if not media_key and media_keys:
@@ -352,7 +454,8 @@ async def create_post(post_data: PostCreate, user_id: str):
             is_reel=post_data.is_reel,
             music_volume=post_data.music_volume or 0.2,
             video_volume=post_data.video_volume or 1.0,
-            slideshow_duration=post_data.slideshow_duration or 10
+            slideshow_duration=post_data.slideshow_duration or 10,
+            facebook_page_id=post_data.facebook_page_id
         )
         
         # Create post with "processing" status and job_id
@@ -370,7 +473,12 @@ async def create_post(post_data: PostCreate, user_id: str):
             slideshow_duration=post_data.slideshow_duration,
             job_id=job_id,  # Store job_id for tracking
             created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            updated_at=datetime.utcnow(),
+            scheduled_at=sched_utc.replace(tzinfo=None) if sched_utc else None,
+            timezone=post_data.timezone or "UTC" if sched_utc else None,
+            scheduler_status="scheduled" if sched_utc else None,
+            retry_count=0,
+            facebook_page_id=post_data.facebook_page_id
         ).returning(Post)
         
         post = await database.fetch_one(query)
@@ -400,7 +508,12 @@ async def create_post(post_data: PostCreate, user_id: str):
             is_reel=post['is_reel'],
             status=PostStatus(post['status']),
             created_at=post['created_at'],
-            updated_at=post['updated_at']
+            updated_at=post['updated_at'],
+            scheduled_at=post['scheduled_at'],
+            timezone=post['timezone'],
+            scheduler_status=post['scheduler_status'],
+            retry_count=post['retry_count'],
+            last_attempt_at=post['last_attempt_at']
         )
     else:
         # No processing needed, proceed as before
@@ -434,7 +547,12 @@ async def create_post(post_data: PostCreate, user_id: str):
         video_volume=post_data.video_volume,
         slideshow_duration=post_data.slideshow_duration,
         created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow()
+        updated_at=datetime.utcnow(),
+        scheduled_at=sched_utc.replace(tzinfo=None) if sched_utc else None,
+        timezone=post_data.timezone or "UTC" if sched_utc else None,
+        scheduler_status="scheduled" if sched_utc else None,
+        retry_count=0,
+        facebook_page_id=post_data.facebook_page_id
     ).returning(Post)
     
     post = await database.fetch_one(query)
@@ -454,43 +572,44 @@ async def create_post(post_data: PostCreate, user_id: str):
         )
         await database.execute(target_query)
         
-    # 3. Publish Events
-    failed_platforms = []
-    for platform in post_data.platforms:
-        platform_str = platform.value if hasattr(platform, "value") else str(platform)
-        try:
-            await publish_post_event(
-                post_id=post['id'], 
-                platform=platform, 
-                content=post_data.content, 
-                media_key=post_data.media_key, 
-                user_id=user_id,
-                media_keys=post_data.media_keys,
-                is_reel=post_data.is_reel,
-                facebook_page_id=post_data.facebook_page_id
+    # 3. Publish Events if NOT scheduled
+    if not post_data.scheduled_at:
+        failed_platforms = []
+        for platform in post_data.platforms:
+            platform_str = platform.value if hasattr(platform, "value") else str(platform)
+            try:
+                await publish_post_event(
+                    post_id=post['id'], 
+                    platform=platform, 
+                    content=post_data.content, 
+                    media_key=post_data.media_key, 
+                    user_id=user_id,
+                    media_keys=post_data.media_keys,
+                    is_reel=post_data.is_reel,
+                    facebook_page_id=post_data.facebook_page_id
+                )
+                # Only emit event_published lifecycle stage after confirmed publish success
+                await log_post_stage(
+                    database, post['id'], "orchestrator", "event_published", "INFO",
+                    f"Successfully published post event to posts.{platform_str}"
+                )
+            except Exception as e:
+                failed_platforms.append((platform_str, str(e)))
+                
+        if failed_platforms:
+            # Roll back database changes for this post
+            try:
+                await database.execute(PostTarget.delete().where(PostTarget.c.post_id == post['id']))
+                await database.execute(PostLog.delete().where(PostLog.c.post_id == post['id']))
+                await database.execute(Post.delete().where(Post.c.id == post['id']))
+            except Exception as rollback_err:
+                logger.error(f"Rollback failed: {rollback_err}")
+                
+            error_details = ", ".join([f"{p}: {err}" for p, err in failed_platforms])
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to publish post event, rolling back: {error_details}"
             )
-            # Only emit event_published lifecycle stage after confirmed publish success
-            await log_post_stage(
-                database, post['id'], "orchestrator", "event_published", "INFO",
-                f"Successfully published post event to posts.{platform_str}"
-            )
-        except Exception as e:
-            failed_platforms.append((platform_str, str(e)))
-            
-    if failed_platforms:
-        # Roll back database changes for this post
-        try:
-            await database.execute(PostTarget.delete().where(PostTarget.c.post_id == post['id']))
-            await database.execute(PostLog.delete().where(PostLog.c.post_id == post['id']))
-            await database.execute(Post.delete().where(Post.c.id == post['id']))
-        except Exception as rollback_err:
-            logger.error(f"Rollback failed: {rollback_err}")
-            
-        error_details = ", ".join([f"{p}: {err}" for p, err in failed_platforms])
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to publish post event, rolling back: {error_details}"
-        )
 
     return PostResponse(
         id=post['id'],
@@ -501,13 +620,14 @@ async def create_post(post_data: PostCreate, user_id: str):
         is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
-        updated_at=post['updated_at']
+        updated_at=post['updated_at'],
+        scheduled_at=post['scheduled_at'],
+        timezone=post['timezone'],
+        scheduler_status=post['scheduler_status'],
+        retry_count=post['retry_count'],
+        last_attempt_at=post['last_attempt_at']
     )
 
-from pydantic import BaseModel
-
-class PostUpdate(BaseModel):
-    content: str
 
 @app.delete("/posts/{post_id}")
 async def delete_post(post_id: uuid.UUID):
@@ -588,6 +708,9 @@ async def delete_post(post_id: uuid.UUID):
 @app.put("/posts/{post_id}", response_model=PostResponse)
 async def update_post_endpoint(post_id: uuid.UUID, update_data: PostUpdate):
     import httpx
+    import zoneinfo
+    from datetime import timezone as dt_timezone
+    
     # 1. Fetch post
     post_query = Post.select().where(Post.c.id == post_id)
     post = await database.fetch_one(post_query)
@@ -595,56 +718,124 @@ async def update_post_endpoint(post_id: uuid.UUID, update_data: PostUpdate):
         raise HTTPException(status_code=404, detail="Post not found")
         
     user_id = post["user_id"]
-
+    is_scheduled_state = post["scheduler_status"] in ("scheduled", "cancelled", "failed")
+    
     # 2. Fetch targets
     targets_query = PostTarget.select().where(PostTarget.c.post_id == post_id)
     targets = await database.fetch_all(targets_query)
 
-    # 3. Update the post message/caption on each platform
-    async with httpx.AsyncClient() as client:
-        for target in targets:
-            platform = target["platform"]
-            ext_id = target["external_id"]
-            if ext_id and target["status"] in ("published", "success", "completed", "synced"):
+    if not is_scheduled_state:
+        # Published post path
+        if update_data.scheduled_at is not None or update_data.timezone is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot reschedule an already published post"
+            )
+            
+        # Update the post message/caption on each platform
+        async with httpx.AsyncClient() as client:
+            for target in targets:
+                platform = target["platform"]
+                ext_id = target["external_id"]
+                if ext_id and target["status"] in ("published", "success", "completed", "synced"):
+                    svc_url = f"http://{platform}-service:8000/posts/{ext_id}"
+                    try:
+                        logger.info(f"Updating post {ext_id} message on platform {platform}")
+                        resp = await client.put(
+                            svc_url, 
+                            params={"user_id": user_id, "message": update_data.content}, 
+                            timeout=10.0
+                        )
+                        if resp.status_code != 200:
+                            logger.error(f"Platform service {platform} failed to update post {ext_id}: {resp.text}")
+                    except Exception as e:
+                        logger.error(f"Failed to connect to platform service {platform} to update post {ext_id}: {e}")
+
+            # Historically synced post
+            if post["status"] == PostStatus.SYNCED.value and post["external_id"] and post["platform"]:
+                platform = post["platform"]
+                ext_id = post["external_id"]
                 svc_url = f"http://{platform}-service:8000/posts/{ext_id}"
                 try:
-                    logger.info(f"Updating post {ext_id} message on platform {platform}")
+                    logger.info(f"Updating synced post {ext_id} message on platform {platform}")
                     resp = await client.put(
                         svc_url, 
                         params={"user_id": user_id, "message": update_data.content}, 
                         timeout=10.0
                     )
                     if resp.status_code != 200:
-                        logger.error(f"Platform service {platform} failed to update post {ext_id}: {resp.text}")
+                        logger.error(f"Platform service {platform} failed to update synced post {ext_id}: {resp.text}")
                 except Exception as e:
-                    logger.error(f"Failed to connect to platform service {platform} to update post {ext_id}: {e}")
+                    logger.error(f"Failed to connect to platform service {platform} to update synced post {ext_id}: {e}")
 
-        # Historically synced post
-        if post["status"] == PostStatus.SYNCED.value and post["external_id"] and post["platform"]:
-            platform = post["platform"]
-            ext_id = post["external_id"]
-            svc_url = f"http://{platform}-service:8000/posts/{ext_id}"
+        # Update local database content
+        update_vals = {"updated_at": datetime.utcnow()}
+        if update_data.content is not None:
+            update_vals["content"] = update_data.content
+            
+        update_query = (
+            Post.update()
+            .where(Post.c.id == post_id)
+            .values(**update_vals)
+        )
+        await database.execute(update_query)
+        
+    else:
+        # Scheduled/cancelled/failed post path
+        update_vals = {"updated_at": datetime.utcnow()}
+        
+        if update_data.content is not None:
+            update_vals["content"] = update_data.content
+            
+        tz_name = update_data.timezone or post["timezone"] or "UTC"
+        if update_data.timezone is not None:
             try:
-                logger.info(f"Updating synced post {ext_id} message on platform {platform}")
-                resp = await client.put(
-                    svc_url, 
-                    params={"user_id": user_id, "message": update_data.content}, 
-                    timeout=10.0
-                )
-                if resp.status_code != 200:
-                    logger.error(f"Platform service {platform} failed to update synced post {ext_id}: {resp.text}")
-            except Exception as e:
-                logger.error(f"Failed to connect to platform service {platform} to update synced post {ext_id}: {e}")
+                zoneinfo.ZoneInfo(update_data.timezone)
+                update_vals["timezone"] = update_data.timezone
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"Invalid timezone: {update_data.timezone}")
+                
+        if update_data.scheduled_at is not None:
+            try:
+                tz = zoneinfo.ZoneInfo(tz_name)
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"Invalid timezone: {tz_name}")
+                
+            sched_dt = update_data.scheduled_at
+            if sched_dt.tzinfo is None:
+                sched_dt = sched_dt.replace(tzinfo=tz)
+                
+            now_utc = datetime.now(dt_timezone.utc)
+            sched_utc = sched_dt.astimezone(dt_timezone.utc)
+            if sched_utc <= now_utc:
+                raise HTTPException(status_code=400, detail="Scheduled time must be in the future")
+                
+            update_vals["scheduled_at"] = sched_utc.replace(tzinfo=None)
+            update_vals["scheduler_status"] = "scheduled"
+            update_vals["retry_count"] = 0
+            update_vals["last_attempt_at"] = None
+            update_vals["status"] = PostStatus.PENDING.value
+            
+            # Reset target statuses back to pending
+            await database.execute(
+                PostTarget.update()
+                .where(PostTarget.c.post_id == post_id)
+                .values(status="pending")
+            )
+            
+            await log_post_stage(
+                database, post_id, "orchestrator", "scheduled_rescheduled", "INFO",
+                f"Scheduled post was updated/rescheduled to {sched_utc.replace(tzinfo=None)} UTC."
+            )
 
-    # 4. Update local database
-    update_query = (
-        Post.update()
-        .where(Post.c.id == post_id)
-        .values(content=update_data.content, updated_at=datetime.utcnow())
-    )
-    await database.execute(update_query)
+        update_query = (
+            Post.update()
+            .where(Post.c.id == post_id)
+            .values(**update_vals)
+        )
+        await database.execute(update_query)
 
-    # 5. Fetch updated post to return
+    # Fetch updated post to return
     updated_post = await database.fetch_one(post_query)
     
     # Get platforms list
@@ -661,7 +852,76 @@ async def update_post_endpoint(post_id: uuid.UUID, update_data: PostUpdate):
         is_reel=updated_post['is_reel'],
         status=PostStatus(updated_post['status']),
         created_at=updated_post['created_at'],
-        updated_at=updated_post['updated_at']
+        updated_at=updated_post['updated_at'],
+        scheduled_at=updated_post['scheduled_at'],
+        timezone=updated_post['timezone'],
+        scheduler_status=updated_post['scheduler_status'],
+        retry_count=updated_post['retry_count'],
+        last_attempt_at=updated_post['last_attempt_at']
+    )
+
+@app.post("/posts/{post_id}/cancel", response_model=PostResponse)
+async def cancel_scheduled_post(post_id: uuid.UUID):
+    # 1. Fetch post
+    post_query = Post.select().where(Post.c.id == post_id)
+    post = await database.fetch_one(post_query)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+        
+    # Check if the post is scheduled
+    if post["scheduler_status"] != "scheduled":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot cancel post in state: {post['scheduler_status'] or 'not scheduled'}"
+        )
+        
+    # Update status to cancelled
+    update_query = (
+        Post.update()
+        .where(Post.c.id == post_id)
+        .values(
+            scheduler_status="cancelled", 
+            status=PostStatus.FAILED.value,
+            updated_at=datetime.utcnow()
+        )
+    )
+    await database.execute(update_query)
+    
+    # Update targets to failed/cancelled
+    await database.execute(
+        PostTarget.update()
+        .where(PostTarget.c.post_id == post_id)
+        .values(status="cancelled")
+    )
+    
+    await log_post_stage(
+        database, post_id, "orchestrator", "scheduled_cancelled", "INFO",
+        "Scheduled post was cancelled by user."
+    )
+    
+    # Fetch updated post
+    updated_post = await database.fetch_one(post_query)
+    targets_query = PostTarget.select().where(PostTarget.c.post_id == post_id)
+    targets = await database.fetch_all(targets_query)
+    platforms_list = [Platform(t["platform"]) for t in targets if t["platform"] in Platform.__members__.values()]
+    if not platforms_list:
+        platforms_list = [Platform.FACEBOOK]
+        
+    return PostResponse(
+        id=updated_post['id'],
+        content=updated_post['content'],
+        media_key=get_presigned_download_url(updated_post['media_key']),
+        media_keys=[get_presigned_download_url(k) for k in json.loads(updated_post['media_keys'])] if updated_post['media_keys'] else None,
+        platforms=platforms_list,
+        is_reel=updated_post['is_reel'],
+        status=PostStatus(updated_post['status']),
+        created_at=updated_post['created_at'],
+        updated_at=updated_post['updated_at'],
+        scheduled_at=updated_post['scheduled_at'],
+        timezone=updated_post['timezone'],
+        scheduler_status=updated_post['scheduler_status'],
+        retry_count=updated_post['retry_count'],
+        last_attempt_at=updated_post['last_attempt_at']
     )
 
 @app.get("/posts/{post_id}", response_model=PostResponse)
@@ -696,7 +956,12 @@ async def get_post(post_id: uuid.UUID):
         is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
-        updated_at=post['updated_at']
+        updated_at=post['updated_at'],
+        scheduled_at=post['scheduled_at'],
+        timezone=post['timezone'],
+        scheduler_status=post['scheduler_status'],
+        retry_count=post['retry_count'],
+        last_attempt_at=post['last_attempt_at']
     )
 
 @app.get("/posts/{post_id}/logs")
@@ -762,7 +1027,12 @@ async def list_posts(user_id: str):
             is_reel=p['is_reel'],
             status=PostStatus(p['status']),
             created_at=p['created_at'],
-            updated_at=p['updated_at']
+            updated_at=p['updated_at'] or p['created_at'] or datetime.utcnow(),
+            scheduled_at=p['scheduled_at'],
+            timezone=p['timezone'],
+            scheduler_status=p['scheduler_status'],
+            retry_count=p['retry_count'],
+            last_attempt_at=p['last_attempt_at']
         ))
     return results
 
@@ -793,6 +1063,10 @@ async def get_upload_url(filename: str, user_id: str, content_type: str = "image
 def parse_iso_datetime(dt_str: str) -> datetime:
     # Standardize 'Z' to '+00:00' to support Python's fromisoformat
     standardized = dt_str.replace("Z", "+00:00")
+    # Handle offsets like +0000 by adding a colon if needed
+    if len(standardized) >= 5 and standardized[-5] in ('+', '-'):
+        if ":" not in standardized[-3:]:
+            standardized = standardized[:-2] + ":" + standardized[-2:]
     dt = datetime.fromisoformat(standardized)
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
@@ -806,45 +1080,89 @@ async def sync_posts(user_id: str):
     import httpx
     
     # 1. Get Connections (We need to know which services to call)
-    # Ideally we'd ask a central registry or check credentials, but for simplicity we'll try all known services
     services = [
         {"name": "facebook", "url": "http://facebook-service:8000/feed"},
         {"name": "instagram", "url": "http://instagram-service:8000/feed"},
-        # Add others as implemented:
-        # {"name": "linkedin", "url": "http://linkedin-service:8000/feed"},
     ]
     
     synced_count = 0
     
     async with httpx.AsyncClient() as client:
         for svc in services:
+            platform = svc["name"]
             try:
                 resp = await client.get(svc['url'], params={"user_id": user_id})
                 if resp.status_code == 200:
                     posts = resp.json()
                     for p in posts:
-                        # 2. Check overlap logic (Upsert or Insert Ignore)
-                        # We use external_id to check existence
+                        ext_id = p['original_id']
+                        # Check existence
                         exists_query = Post.select().where(
-                            (Post.c.external_id == p['original_id']) & 
-                            (Post.c.platform == p['platform']) &
+                            (Post.c.external_id == ext_id) & 
+                            (Post.c.platform == platform) &
                             (Post.c.user_id == user_id)
                         )
                         existing = await database.fetch_one(exists_query)
                         
                         if not existing:
-                            # Insert
+                            new_post_id = uuid.uuid4()
+                            post_created_at = parse_iso_datetime(p['created_at']) if p.get('created_at') else datetime.utcnow()
+                            
+                            # Insert Post
                             query = Post.insert().values(
-                                id=uuid.uuid4(),
+                                id=new_post_id,
                                 content=p['content'],
                                 status=PostStatus.SYNCED.value, # Differentiate from our created posts
                                 user_id=user_id,
-                                created_at=parse_iso_datetime(p['created_at']) if p.get('created_at') else datetime.utcnow(),
-                                external_id=p['original_id'],
-                                platform=p['platform']
+                                created_at=post_created_at,
+                                updated_at=post_created_at,
+                                external_id=ext_id,
+                                platform=platform
                             )
                             await database.execute(query)
                             synced_count += 1
+                            
+                            # Immediately pull current metrics to backfill snapshots
+                            metrics = {"likes": 0, "comments": 0, "shares": 0, "views": 0}
+                            metrics_url = f"http://{platform}-service:8000/posts/{ext_id}/metrics"
+                            try:
+                                m_resp = await client.get(metrics_url, params={"user_id": user_id}, timeout=5.0)
+                                if m_resp.status_code == 200:
+                                    metrics = m_resp.json()
+                            except Exception as me:
+                                logger.error(f"Failed to fetch initial metrics for synced post {ext_id} during backfill: {me}")
+                            
+                            # Backfill snapshots up to 30 days
+                            now = datetime.utcnow()
+                            delta_days = (now - post_created_at).days
+                            start_backfill_days = min(max(0, delta_days), 30)
+                            
+                            for day_offset in range(start_backfill_days + 1):
+                                snapshot_time = now - timedelta(days=start_backfill_days - day_offset)
+                                
+                                # Estimate daily metric counts using a growth factor
+                                fraction = (day_offset + 1) / (start_backfill_days + 1)
+                                scale = fraction * fraction
+                                
+                                likes = int(metrics.get("likes", 0) * scale)
+                                comments = int(metrics.get("comments", 0) * scale)
+                                shares = int(metrics.get("shares", 0) * scale)
+                                views = int(metrics.get("views", 0) * scale)
+                                
+                                # Insert snapshot
+                                snapshot_query = AnalyticsSnapshot.insert().values(
+                                    id=uuid.uuid4(),
+                                    post_id=new_post_id,
+                                    platform=platform,
+                                    likes=likes,
+                                    comments=comments,
+                                    shares=shares,
+                                    views=views,
+                                    timestamp=snapshot_time
+                                )
+                                await database.execute(snapshot_query)
+                                logger.info(f"Backfilled snapshot for post {new_post_id} on {snapshot_time}")
+                                
             except Exception as e:
                 logger.error(f"Failed to sync from {svc['name']}: {e}")
                 
