@@ -80,11 +80,8 @@ async def facebook_callback(code: str, state: str):
                 user_access_token = resp.json().get("access_token")
             except httpx.HTTPStatusError as e:
                 logger.error(f"HTTP Status Error: {e.response.status_code} - {e.response.text}")
-                return {
-                    "status": "error", 
-                    "reason": "auth_exchange_failed", 
-                    "details": f"Status: {e.response.status_code}, Body: {e.response.text}"
-                }
+                redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
+                return RedirectResponse(url=f"{redirect_url}?connection=error&platform=facebook&reason=auth_exchange_failed")
             except Exception as e:
                 import traceback
                 logger.error(f"Failed to exchange token with Facebook: {e}")
@@ -93,7 +90,8 @@ async def facebook_callback(code: str, state: str):
                      logger.warning("Falling back to MOCK token due to error (MOCK_MODE=true)")
                      pass
                 else:
-                    return {"status": "error", "reason": "auth_exchange_failed", "details": str(e)}
+                    redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
+                    return RedirectResponse(url=f"{redirect_url}?connection=error&platform=facebook&reason=auth_exchange_failed")
 
     # Fallback for Mock Mode if configured and real exchange failed or keys missing
     if not user_access_token:
@@ -111,6 +109,55 @@ async def facebook_callback(code: str, state: str):
         page_id=None 
     )
     await database.execute(query)
+    
+    # Store in centralized multi-account tables
+    from libs.common.db_models import SocialAccount as CentralSocialAccount, OAuthToken as CentralOAuthToken, SocialTarget as CentralSocialTarget, TokenRefreshMetadata as CentralTokenRefreshMetadata
+    from libs.common.security import encrypt_token
+    from sqlalchemy import select
+
+    platform_user_id = f"fb_{user_id}"
+    
+    # Check if already exists in central social_accounts
+    existing_query = select(CentralSocialAccount.c.id).where(
+        (CentralSocialAccount.c.user_id == user_id) &
+        (CentralSocialAccount.c.platform == "facebook") &
+        (CentralSocialAccount.c.platform_user_id == platform_user_id)
+    )
+    existing_account = await database.fetch_one(existing_query)
+    
+    if existing_account:
+        account_id = existing_account["id"]
+    else:
+        account_id = uuid.uuid4()
+        await database.execute(
+            CentralSocialAccount.insert().values(
+                id=account_id,
+                user_id=user_id,
+                platform="facebook",
+                platform_user_id=platform_user_id,
+                account_name="Facebook Account"
+            )
+        )
+        
+    # Save/Update CentralOAuthToken
+    await database.execute(CentralOAuthToken.delete().where(CentralOAuthToken.c.account_id == account_id))
+    await database.execute(
+        CentralOAuthToken.insert().values(
+            id=uuid.uuid4(),
+            account_id=account_id,
+            access_token=encrypt_token(user_access_token)
+        )
+    )
+    
+    # Save/Update CentralTokenRefreshMetadata
+    await database.execute(CentralTokenRefreshMetadata.delete().where(CentralTokenRefreshMetadata.c.account_id == account_id))
+    await database.execute(
+        CentralTokenRefreshMetadata.insert().values(
+            id=uuid.uuid4(),
+            account_id=account_id,
+            refresh_status="success"
+        )
+    )
     
     # Fetch User Pages
     client = FacebookClient(user_access_token, "me")
@@ -132,6 +179,25 @@ async def facebook_callback(code: str, state: str):
                 await database.execute(t_query)
             except Exception:
                 pass # Ignore dupes for now
+
+            # Write to central targets
+            existing_target_query = select(CentralSocialTarget.c.id).where(
+                (CentralSocialTarget.c.account_id == account_id) &
+                (CentralSocialTarget.c.target_id == page['id'])
+            )
+            existing_target = await database.fetch_one(existing_target_query)
+            if not existing_target:
+                await database.execute(
+                    CentralSocialTarget.insert().values(
+                        id=uuid.uuid4(),
+                        account_id=account_id,
+                        target_id=page['id'],
+                        target_name=page['name'],
+                        target_type="page",
+                        access_token=encrypt_token(page['access_token']),
+                        platform="facebook"
+                    )
+                )
             
     except Exception as e:
         logger.error(f"Failed to fetch pages: {e}")
@@ -139,7 +205,7 @@ async def facebook_callback(code: str, state: str):
         await client.close()
     
     redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
-    return RedirectResponse(url=redirect_url)
+    return RedirectResponse(url=f"{redirect_url}?connection=success&platform=facebook")
 
 @router.get("/credentials", response_model=CredentialResponse)
 async def get_credentials(user_id: str):

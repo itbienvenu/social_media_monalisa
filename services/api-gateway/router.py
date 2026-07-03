@@ -163,66 +163,7 @@ async def logout(response: Response):
 
 # --- Connections Management ---
 
-@router.get("/connections")
-async def get_connections(
-    user_id: str = None,
-    user_info: dict = Depends(verify_token)
-):
-    token_user_id = user_info.get("user_id")
-    if user_id and user_id != token_user_id:
-        raise HTTPException(status_code=403, detail="Forbidden: User ID mismatch")
-    user_id = token_user_id
-    services = [
-        {"name": "facebook", "url": f"{FACEBOOK_SERVICE_URL}/credentials"},
-        {"name": "instagram", "url": "http://instagram-service:8000/credentials"},
-        {"name": "linkedin", "url": "http://linkedin-service:8000/credentials"},
-        {"name": "tiktok", "url": "http://tiktok-service:8000/credentials"},
-    ]
-    
-    results = []
-    async with httpx.AsyncClient() as client:
-        # We could run these in parallel with asyncio.gather
-        import asyncio
-        tasks = []
-        for svc in services:
-             tasks.append(client.get(svc['url'], params={"user_id": user_id}))
-        
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for i, resp in enumerate(responses):
-            platform = services[i]['name']
-            if isinstance(resp, Exception):
-                results.append({"platform": platform, "connected": False, "error": str(resp)})
-            elif resp.status_code == 200:
-                results.append(resp.json())
-            else:
-                 results.append({"platform": platform, "connected": False})
-                 
-    return results
 
-
-@router.delete("/connections/{platform}")
-async def delete_connection(platform: str, user_info: dict = Depends(verify_token)):
-    user_id = user_info.get("user_id")
-    
-    if platform == "facebook":
-        target_url = f"{FACEBOOK_SERVICE_URL}/credentials"
-    elif platform == "tiktok":
-        target_url = "http://tiktok-service:8000/credentials"
-    elif platform == "instagram":
-        target_url = "http://instagram-service:8000/credentials"
-    elif platform == "linkedin":
-        target_url = "http://linkedin-service:8000/credentials"
-    else:
-        raise HTTPException(status_code=400, detail="Platform not supported")
-        
-    async with httpx.AsyncClient() as client:
-        try:
-             resp = await client.delete(target_url, params={"user_id": user_id})
-             resp.raise_for_status()
-             return resp.json()
-        except httpx.HTTPError as e:
-             raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/facebook/targets")
 async def get_facebook_targets(
@@ -693,4 +634,81 @@ async def get_analytics_trends(user_info: dict = Depends(verify_token)):
              raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
         except httpx.HTTPStatusError as exc:
              raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
+# --- Connections / Multi-Account Proxies ---
+from typing import List
+
+class GatewayUpdatePreferencesPayload(BaseModel):
+    preferred_target_ids: List[str]
+
+
+@router.get("/connections")
+async def get_connections(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{POST_ORCHESTRATOR_URL}/connections",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
+@router.delete("/connections/{account_id}")
+async def disconnect_account(account_id: str, user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.delete(
+                f"{POST_ORCHESTRATOR_URL}/connections/{account_id}",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
+@router.get("/connections/targets")
+async def get_connections_targets(user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{POST_ORCHESTRATOR_URL}/connections/targets",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
+
+@router.put("/connections/preferences")
+async def update_target_preferences(payload: GatewayUpdatePreferencesPayload, user_info: dict = Depends(verify_token)):
+    user_id = user_info.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.put(
+                f"{POST_ORCHESTRATOR_URL}/connections/preferences",
+                params={"user_id": user_id},
+                json=payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+             raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
+        except httpx.HTTPStatusError as exc:
+             raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+
 

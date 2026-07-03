@@ -62,6 +62,7 @@ PostTarget = Table(
     Column("platform", String),
     Column("status", String, default="pending"),
     Column("external_id", String, nullable=True),
+    Column("target_id", String, nullable=True),
 )
 
 PostLog = Table(
@@ -100,3 +101,5 @@ AnalyticsSnapshot = Table(
     Column("views", sqlalchemy.Integer, default=0),
     Column("timestamp", DateTime, default=datetime.datetime.utcnow),
 )
+
+from libs.common.db_models import SocialAccount, OAuthToken, SocialTarget, TokenRefreshMetadata, shared_metadata

@@ -76,12 +76,55 @@ async def handle_post_event(message: dict):
         logger.error("User ID missing in message")
         return
     
-    # Fetch User Credential
-    query = SocialCredential.select().where(SocialCredential.c.user_id == user_id)
-    cred = await database.fetch_one(query)
-    
-    if cred:
-        await post_to_linkedin(post_id, content, cred['access_token'], cred['linkedin_urn'], media_url, media_urls)
+    # Fetch Page Token (Target)
+    from libs.common.db_models import SocialTarget as CentralSocialTarget, SocialAccount as CentralSocialAccount
+    from libs.common.security import decrypt_token
+    import sqlalchemy
+
+    linkedin_target_urn = message.get("linkedin_urn")
+    target = None
+    decrypted_token = None
+    target_urn = None
+
+    if linkedin_target_urn:
+        query = sqlalchemy.select(
+            CentralSocialTarget.c.target_id,
+            CentralSocialTarget.c.access_token
+        ).select_from(
+            CentralSocialTarget.join(CentralSocialAccount, CentralSocialTarget.c.account_id == CentralSocialAccount.c.id)
+        ).where(
+            (CentralSocialAccount.c.user_id == user_id) &
+            (CentralSocialTarget.c.target_id == linkedin_target_urn) &
+            (CentralSocialTarget.c.platform == "linkedin")
+        )
+        target = await database.fetch_one(query)
+
+    if not target:
+        # Try to find any linkedin profile in central targets first
+        query = sqlalchemy.select(
+            CentralSocialTarget.c.target_id,
+            CentralSocialTarget.c.access_token
+        ).select_from(
+            CentralSocialTarget.join(CentralSocialAccount, CentralSocialTarget.c.account_id == CentralSocialAccount.c.id)
+        ).where(
+            (CentralSocialAccount.c.user_id == user_id) &
+            (CentralSocialTarget.c.platform == "linkedin")
+        )
+        target = await database.fetch_one(query)
+
+    if target:
+        decrypted_token = decrypt_token(target['access_token'])
+        target_urn = target['target_id']
+    else:
+        # Fallback to local legacy table
+        legacy_query = SocialCredential.select().where(SocialCredential.c.user_id == user_id)
+        legacy_cred = await database.fetch_one(legacy_query)
+        if legacy_cred:
+            decrypted_token = legacy_cred['access_token']
+            target_urn = legacy_cred['linkedin_urn']
+
+    if decrypted_token:
+        await post_to_linkedin(post_id, content, decrypted_token, target_urn, media_url, media_urls)
     else:
         logger.error(f"No credentials found for user {user_id}")
         await mq.publish("posts.linkedin.failed", {"post_id": post_id, "reason": "no_credentials"})
@@ -182,9 +225,78 @@ async def linkedin_callback(code: str, state: str):
     )
     await database.execute(query)
     
+    # Store in centralized multi-account tables
+    from libs.common.db_models import SocialAccount as CentralSocialAccount, OAuthToken as CentralOAuthToken, SocialTarget as CentralSocialTarget, TokenRefreshMetadata as CentralTokenRefreshMetadata
+    from libs.common.security import encrypt_token
+    from sqlalchemy import select
+
+    platform_user_id = f"li_{urn}"
+    
+    # Check if already exists in central social_accounts
+    existing_query = select(CentralSocialAccount.c.id).where(
+        (CentralSocialAccount.c.user_id == user_id) &
+        (CentralSocialAccount.c.platform == "linkedin") &
+        (CentralSocialAccount.c.platform_user_id == platform_user_id)
+    )
+    existing_account = await database.fetch_one(existing_query)
+    
+    if existing_account:
+        account_id = existing_account["id"]
+    else:
+        account_id = uuid.uuid4()
+        await database.execute(
+            CentralSocialAccount.insert().values(
+                id=account_id,
+                user_id=user_id,
+                platform="linkedin",
+                platform_user_id=platform_user_id,
+                account_name="LinkedIn Account"
+            )
+        )
+        
+    # Save/Update CentralOAuthToken
+    await database.execute(CentralOAuthToken.delete().where(CentralOAuthToken.c.account_id == account_id))
+    await database.execute(
+        CentralOAuthToken.insert().values(
+            id=uuid.uuid4(),
+            account_id=account_id,
+            access_token=encrypt_token(access_token),
+            expires_at=expires_at
+        )
+    )
+    
+    # Save/Update CentralTokenRefreshMetadata
+    await database.execute(CentralTokenRefreshMetadata.delete().where(CentralTokenRefreshMetadata.c.account_id == account_id))
+    await database.execute(
+        CentralTokenRefreshMetadata.insert().values(
+            id=uuid.uuid4(),
+            account_id=account_id,
+            refresh_status="success"
+        )
+    )
+
+    # Write to central targets
+    existing_target_query = select(CentralSocialTarget.c.id).where(
+        (CentralSocialTarget.c.account_id == account_id) &
+        (CentralSocialTarget.c.target_id == urn)
+    )
+    existing_target = await database.fetch_one(existing_target_query)
+    if not existing_target:
+        await database.execute(
+            CentralSocialTarget.insert().values(
+                id=uuid.uuid4(),
+                account_id=account_id,
+                target_id=urn,
+                target_name="LinkedIn Profile",
+                target_type="profile",
+                access_token=encrypt_token(access_token),
+                platform="linkedin"
+            )
+        )
+    
     # return {"status": "connected", "user_id": user_id, "linkedin_urn": urn}
     redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
-    return RedirectResponse(url=redirect_url)
+    return RedirectResponse(url=f"{redirect_url}?connection=success&platform=linkedin")
 
 @app.get("/credentials")
 async def get_credentials(user_id: str):

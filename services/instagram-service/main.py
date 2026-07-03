@@ -77,18 +77,58 @@ async def handle_post_event(message: dict):
         logger.error("User ID missing in message")
         return
     
-    # Fetch User Credential (IG Target)
-    # We look for an Instagram target
-    query = SocialTarget.select().where(
-        (SocialTarget.c.user_id == user_id) & 
-        (SocialTarget.c.platform == "instagram")
-    )
-    # In reality there could be multiple, we pick one or handle all. 
-    # For MVP we pick the first one.
-    target = await database.fetch_one(query)
-    
+    # Fetch Page Token (Target)
+    from libs.common.db_models import SocialTarget as CentralSocialTarget, SocialAccount as CentralSocialAccount
+    from libs.common.security import decrypt_token
+    import sqlalchemy
+
+    instagram_target_id = message.get("instagram_account_id") or message.get("instagram_page_id")
+    target = None
+    decrypted_token = None
+    target_id = None
+
+    if instagram_target_id:
+        query = sqlalchemy.select(
+            CentralSocialTarget.c.target_id,
+            CentralSocialTarget.c.access_token
+        ).select_from(
+            CentralSocialTarget.join(CentralSocialAccount, CentralSocialTarget.c.account_id == CentralSocialAccount.c.id)
+        ).where(
+            (CentralSocialAccount.c.user_id == user_id) &
+            (CentralSocialTarget.c.target_id == instagram_target_id) &
+            (CentralSocialTarget.c.platform == "instagram")
+        )
+        target = await database.fetch_one(query)
+
+    if not target:
+        # Try to find any instagram account in central targets first
+        query = sqlalchemy.select(
+            CentralSocialTarget.c.target_id,
+            CentralSocialTarget.c.access_token
+        ).select_from(
+            CentralSocialTarget.join(CentralSocialAccount, CentralSocialTarget.c.account_id == CentralSocialAccount.c.id)
+        ).where(
+            (CentralSocialAccount.c.user_id == user_id) &
+            (CentralSocialTarget.c.platform == "instagram")
+        )
+        target = await database.fetch_one(query)
+
     if target:
-        await post_to_instagram(post_id, content, target['access_token'], target['target_id'], media_url, media_urls)
+        decrypted_token = decrypt_token(target['access_token'])
+        target_id = target['target_id']
+    else:
+        # Fallback to local legacy table
+        legacy_query = SocialTarget.select().where(
+            (SocialTarget.c.user_id == user_id) & 
+            (SocialTarget.c.platform == "instagram")
+        )
+        legacy_target = await database.fetch_one(legacy_query)
+        if legacy_target:
+            decrypted_token = legacy_target['access_token']
+            target_id = legacy_target['target_id']
+
+    if decrypted_token:
+        await post_to_instagram(post_id, content, decrypted_token, target_id, media_url, media_urls)
     else:
         logger.error(f"No credentials found for user {user_id}")
         await mq.publish("posts.instagram.failed", {"post_id": post_id, "reason": "no_credentials"})
@@ -186,14 +226,83 @@ async def instagram_callback(code: str, state: str):
                 await database.execute(t_query)
             except Exception:
                 pass
+                
+            # Centralized tables
+            from libs.common.db_models import SocialAccount as CentralSocialAccount, OAuthToken as CentralOAuthToken, SocialTarget as CentralSocialTarget, TokenRefreshMetadata as CentralTokenRefreshMetadata
+            from libs.common.security import encrypt_token
+            from sqlalchemy import select
+
+            platform_user_id = f"ig_{ig['id']}"
+            
+            # Check if already exists in central social_accounts
+            existing_query = select(CentralSocialAccount.c.id).where(
+                (CentralSocialAccount.c.user_id == user_id) &
+                (CentralSocialAccount.c.platform == "instagram") &
+                (CentralSocialAccount.c.platform_user_id == platform_user_id)
+            )
+            existing_account = await database.fetch_one(existing_query)
+            
+            if existing_account:
+                account_id = existing_account["id"]
+            else:
+                account_id = uuid.uuid4()
+                await database.execute(
+                    CentralSocialAccount.insert().values(
+                        id=account_id,
+                        user_id=user_id,
+                        platform="instagram",
+                        platform_user_id=platform_user_id,
+                        account_name=ig['name']
+                    )
+                )
+                
+            # Save/Update CentralOAuthToken
+            await database.execute(CentralOAuthToken.delete().where(CentralOAuthToken.c.account_id == account_id))
+            await database.execute(
+                CentralOAuthToken.insert().values(
+                    id=uuid.uuid4(),
+                    account_id=account_id,
+                    access_token=encrypt_token(user_access_token)
+                )
+            )
+            
+            # Save/Update CentralTokenRefreshMetadata
+            await database.execute(CentralTokenRefreshMetadata.delete().where(CentralTokenRefreshMetadata.c.account_id == account_id))
+            await database.execute(
+                CentralTokenRefreshMetadata.insert().values(
+                    id=uuid.uuid4(),
+                    account_id=account_id,
+                    refresh_status="success"
+                )
+            )
+
+            # Write to central targets
+            existing_target_query = select(CentralSocialTarget.c.id).where(
+                (CentralSocialTarget.c.account_id == account_id) &
+                (CentralSocialTarget.c.target_id == ig['id'])
+            )
+            existing_target = await database.fetch_one(existing_target_query)
+            if not existing_target:
+                await database.execute(
+                    CentralSocialTarget.insert().values(
+                        id=uuid.uuid4(),
+                        account_id=account_id,
+                        target_id=ig['id'],
+                        target_name=ig['name'],
+                        target_type="instagram_account",
+                        access_token=encrypt_token(user_access_token),
+                        platform="instagram"
+                    )
+                )
             
         # return {"status": "connected", "user_id": user_id, "accounts_linked": len(ig_accounts)}
         redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
-        return RedirectResponse(url=redirect_url)
+        return RedirectResponse(url=f"{redirect_url}?connection=success&platform=instagram")
             
     except Exception as e:
         logger.error(f"Failed to fetch IG accounts: {e}")
-        return {"status": "error", "reason": str(e)}
+        redirect_url = os.getenv("LOGIN_REDIRECT_URL", "http://localhost:3000/dashboard")
+        return RedirectResponse(url=f"{redirect_url}?connection=error&platform=instagram&reason=fetch_failed")
     finally:
         await client.close()
 

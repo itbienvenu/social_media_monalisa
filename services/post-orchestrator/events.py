@@ -9,7 +9,7 @@ import os
 S3_ENDPOINT = os.getenv("MINIO_ENDPOINT_URL", "http://minio:9000")
 S3_BUCKET = os.getenv("MINIO_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME") or "uploads"
 
-async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: str, media_key: str = None, user_id: str = "anonymous", media_keys: list = None, is_reel: bool = False, facebook_page_id: str = None):
+async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: str, media_key: str = None, user_id: str = "anonymous", media_keys: list = None, is_reel: bool = False, facebook_page_id: str = None, target_id: str = None):
     mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
     public_base_url = os.getenv("PUBLIC_BASE_URL")
     if not mock_mode and not public_base_url:
@@ -55,6 +55,21 @@ async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: st
         media_url = media_urls[0]
 
     platform_str = platform.value if hasattr(platform, "value") else str(platform)
+    
+    instagram_account_id = None
+    linkedin_urn = None
+    tiktok_open_id = None
+    
+    if target_id:
+        if platform_str == "facebook":
+            facebook_page_id = target_id
+        elif platform_str == "instagram":
+            instagram_account_id = target_id
+        elif platform_str == "linkedin":
+            linkedin_urn = target_id
+        elif platform_str == "tiktok":
+            tiktok_open_id = target_id
+
     event = {
         "post_id": str(post_id),
         "platform": platform_str,
@@ -65,6 +80,9 @@ async def publish_post_event(post_id: uuid.UUID, platform: Platform, content: st
         "media_urls": media_urls,
         "user_id": user_id,
         "is_reel": is_reel,
-        "facebook_page_id": facebook_page_id
+        "facebook_page_id": facebook_page_id,
+        "instagram_account_id": instagram_account_id,
+        "linkedin_urn": linkedin_urn,
+        "tiktok_open_id": tiktok_open_id
     }
     await mq.publish(f"posts.{platform_str}", event)

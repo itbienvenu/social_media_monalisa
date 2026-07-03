@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from libs.common.serializers import PostCreate, PostResponse, PostStatus, Platform, PostUpdate
-from services.post_orchestrator.db import database, Post, PostTarget, PostLog, Notification, AnalyticsSnapshot, metadata
+from services.post_orchestrator.db import database, Post, PostTarget, PostLog, Notification, AnalyticsSnapshot, metadata, shared_metadata
 import sqlalchemy
 import asyncio
 from services.post_orchestrator.media import generate_upload_url, delete_media_files, get_presigned_download_url
@@ -262,6 +262,225 @@ async def handle_post_failed(data: dict, platform: str):
     except Exception as e:
         logger.error(f"Failed to update post failure in DB: {e}")
 
+def run_multi_account_migration(conn, inspector):
+    from libs.common.security import encrypt_token
+    import uuid
+    
+    tables = inspector.get_table_names()
+    logger.info(f"Database inspector tables: {tables}")
+    
+    # 1. Facebook Credentials & Targets
+    if "facebook_credentials" in tables:
+        try:
+            fb_creds = conn.execute(sqlalchemy.text("SELECT id, user_id, access_token FROM facebook_credentials")).fetchall()
+            for cred in fb_creds:
+                user_id = cred[1]
+                access_token = cred[2]
+                
+                # Check if already migrated
+                existing = conn.execute(sqlalchemy.text(
+                    "SELECT id FROM social_accounts WHERE user_id = :u AND platform = 'facebook'"
+                ), {"u": user_id}).fetchone()
+                
+                if not existing:
+                    account_id = uuid.uuid4()
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO social_accounts (id, user_id, platform, platform_user_id, account_name) "
+                        "VALUES (:id, :u, 'facebook', :p_uid, :name)"
+                    ), {
+                        "id": account_id,
+                        "u": user_id,
+                        "p_uid": f"fb_user_{user_id}",
+                        "name": "Facebook Account"
+                    })
+                    
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO oauth_tokens (id, account_id, access_token) "
+                        "VALUES (:id, :a_id, :tok)"
+                    ), {
+                        "id": uuid.uuid4(),
+                        "a_id": account_id,
+                        "tok": encrypt_token(access_token)
+                    })
+                    logger.info(f"Migrated Facebook Account for user {user_id}")
+                    
+                    if "facebook_targets" in tables:
+                        fb_targets = conn.execute(sqlalchemy.text(
+                            "SELECT target_id, target_name, target_type, access_token FROM facebook_targets WHERE user_id = :u"
+                        ), {"u": user_id}).fetchall()
+                        for target in fb_targets:
+                            t_id = target[0]
+                            t_name = target[1]
+                            t_type = target[2]
+                            t_tok = target[3]
+                            conn.execute(sqlalchemy.text(
+                                "INSERT INTO social_targets (id, account_id, target_id, target_name, target_type, access_token, platform) "
+                                "VALUES (:id, :a_id, :t_id, :t_name, :t_type, :t_tok, 'facebook')"
+                            ), {
+                                "id": uuid.uuid4(),
+                                "a_id": account_id,
+                                "t_id": t_id,
+                                "t_name": t_name,
+                                "t_type": t_type,
+                                "t_tok": encrypt_token(t_tok) if t_tok else None
+                            })
+                            logger.info(f"Migrated Facebook Page Target {t_name} for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error migrating Facebook credentials: {e}")
+
+    # 2. Instagram Targets
+    if "instagram_targets" in tables:
+        try:
+            ig_targets = conn.execute(sqlalchemy.text("SELECT user_id, target_id, target_name, access_token FROM instagram_targets")).fetchall()
+            for ig in ig_targets:
+                user_id = ig[0]
+                target_id = ig[1]
+                target_name = ig[2]
+                access_token = ig[3]
+                
+                existing = conn.execute(sqlalchemy.text(
+                    "SELECT id FROM social_accounts WHERE user_id = :u AND platform = 'instagram' AND platform_user_id = :p_uid"
+                ), {"u": user_id, "p_uid": target_id}).fetchone()
+                
+                if not existing:
+                    account_id = uuid.uuid4()
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO social_accounts (id, user_id, platform, platform_user_id, account_name) "
+                        "VALUES (:id, :u, 'instagram', :p_uid, :name)"
+                    ), {
+                        "id": account_id,
+                        "u": user_id,
+                        "p_uid": target_id,
+                        "name": target_name
+                    })
+                    
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO oauth_tokens (id, account_id, access_token) "
+                        "VALUES (:id, :a_id, :tok)"
+                    ), {
+                        "id": uuid.uuid4(),
+                        "a_id": account_id,
+                        "tok": encrypt_token(access_token)
+                    })
+                    
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO social_targets (id, account_id, target_id, target_name, target_type, access_token, platform) "
+                        "VALUES (:id, :a_id, :t_id, :t_name, 'instagram_account', :t_tok, 'instagram')"
+                    ), {
+                        "id": uuid.uuid4(),
+                        "a_id": account_id,
+                        "t_id": target_id,
+                        "t_name": target_name,
+                        "t_tok": encrypt_token(access_token)
+                    })
+                    logger.info(f"Migrated Instagram Target {target_name} for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error migrating Instagram targets: {e}")
+
+    # 3. LinkedIn Credentials
+    if "linkedin_credentials" in tables:
+        try:
+            li_creds = conn.execute(sqlalchemy.text("SELECT user_id, linkedin_urn, access_token, refresh_token, expires_at, refresh_expires_at, scope FROM linkedin_credentials")).fetchall()
+            for cred in li_creds:
+                user_id = cred[0]
+                urn = cred[1]
+                access_token = cred[2]
+                refresh_token = cred[3]
+                expires_at = cred[4]
+                refresh_expires_at = cred[5]
+                scope = cred[6]
+                
+                existing = conn.execute(sqlalchemy.text(
+                    "SELECT id FROM social_accounts WHERE user_id = :u AND platform = 'linkedin' AND platform_user_id = :p_uid"
+                ), {"u": user_id, "p_uid": urn}).fetchone()
+                
+                if not existing:
+                    account_id = uuid.uuid4()
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO social_accounts (id, user_id, platform, platform_user_id, account_name) "
+                        "VALUES (:id, :u, 'linkedin', :p_uid, 'LinkedIn Account')"
+                    ), {
+                        "id": account_id,
+                        "u": user_id,
+                        "p_uid": urn
+                    })
+                    
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO oauth_tokens (id, account_id, access_token, refresh_token, expires_at, refresh_expires_at, scopes) "
+                        "VALUES (:id, :a_id, :tok, :r_tok, :exp, :r_exp, :sc)"
+                    ), {
+                        "id": uuid.uuid4(),
+                        "a_id": account_id,
+                        "tok": encrypt_token(access_token),
+                        "r_tok": encrypt_token(refresh_token) if refresh_token else None,
+                        "exp": expires_at,
+                        "r_exp": refresh_expires_at,
+                        "sc": scope
+                    })
+                    
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO social_targets (id, account_id, target_id, target_name, target_type, platform) "
+                        "VALUES (:id, :a_id, :t_id, 'LinkedIn Profile', 'personal', 'linkedin')"
+                    ), {
+                        "id": uuid.uuid4(),
+                        "a_id": account_id,
+                        "t_id": urn
+                    })
+                    logger.info(f"Migrated LinkedIn Account for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error migrating LinkedIn credentials: {e}")
+
+    # 4. TikTok Credentials
+    if "tiktok_credentials" in tables:
+        try:
+            tk_creds = conn.execute(sqlalchemy.text("SELECT user_id, open_id, access_token, refresh_token, expires_at, refresh_expires_at FROM tiktok_credentials")).fetchall()
+            for cred in tk_creds:
+                user_id = cred[0]
+                open_id = cred[1]
+                access_token = cred[2]
+                refresh_token = cred[3]
+                expires_at = cred[4]
+                refresh_expires_at = cred[5]
+                
+                existing = conn.execute(sqlalchemy.text(
+                    "SELECT id FROM social_accounts WHERE user_id = :u AND platform = 'tiktok' AND platform_user_id = :p_uid"
+                ), {"u": user_id, "p_uid": open_id}).fetchone()
+                
+                if not existing:
+                    account_id = uuid.uuid4()
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO social_accounts (id, user_id, platform, platform_user_id, account_name) "
+                        "VALUES (:id, :u, 'tiktok', :p_uid, 'TikTok Account')"
+                    ), {
+                        "id": account_id,
+                        "u": user_id,
+                        "p_uid": open_id
+                    })
+                    
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO oauth_tokens (id, account_id, access_token, refresh_token, expires_at, refresh_expires_at) "
+                        "VALUES (:id, :a_id, :tok, :r_tok, :exp, :r_exp)"
+                    ), {
+                        "id": uuid.uuid4(),
+                        "a_id": account_id,
+                        "tok": encrypt_token(access_token),
+                        "r_tok": encrypt_token(refresh_token) if refresh_token else None,
+                        "exp": expires_at,
+                        "r_exp": refresh_expires_at
+                    })
+                    
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO social_targets (id, account_id, target_id, target_name, target_type, platform) "
+                        "VALUES (:id, :a_id, :t_id, 'TikTok Profile', 'personal', 'tiktok')"
+                    ), {
+                        "id": uuid.uuid4(),
+                        "a_id": account_id,
+                        "t_id": open_id
+                    })
+                    logger.info(f"Migrated TikTok Account for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error migrating TikTok credentials: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_db_with_retry(database)
@@ -278,6 +497,7 @@ async def lifespan(app: FastAPI):
     engine = sqlalchemy.create_engine(str(database.url))
     try:
         metadata.create_all(engine)
+        shared_metadata.create_all(engine)
     except Exception as e:
         logger.warning(f"Table creation skipped or already completed: {e}")
     
@@ -285,6 +505,7 @@ async def lifespan(app: FastAPI):
     with engine.begin() as conn:
         try:
             inspector = sqlalchemy.inspect(engine)
+            run_multi_account_migration(conn, inspector)
             if "posts" in inspector.get_table_names():
                 columns = [c["name"] for c in inspector.get_columns("posts")]
                 if "external_id" not in columns:
@@ -353,6 +574,42 @@ async def lifespan(app: FastAPI):
                         logger.warning(f"Could not add unique constraint to posts table: {ce}")
         except Exception as me:
             logger.error(f"Failed to check/migrate posts table schema: {me}")
+
+        try:
+            inspector = sqlalchemy.inspect(engine)
+            if "post_targets" in inspector.get_table_names():
+                columns = [c["name"] for c in inspector.get_columns("post_targets")]
+                if "target_id" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE post_targets ADD COLUMN target_id VARCHAR"))
+                    logger.info("Migrated schema: Added column target_id to post_targets table")
+        except Exception as me:
+            logger.error(f"Failed to check/migrate post_targets table schema: {me}")
+
+        try:
+            inspector = sqlalchemy.inspect(engine)
+            if "social_accounts" in inspector.get_table_names():
+                columns = [c["name"] for c in inspector.get_columns("social_accounts")]
+                if "username" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE social_accounts ADD COLUMN username VARCHAR"))
+                    logger.info("Migrated schema: Added column username to social_accounts table")
+                if "display_name" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE social_accounts ADD COLUMN display_name VARCHAR"))
+                    logger.info("Migrated schema: Added column display_name to social_accounts table")
+                if "profile_picture" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE social_accounts ADD COLUMN profile_picture VARCHAR"))
+                    logger.info("Migrated schema: Added column profile_picture to social_accounts table")
+        except Exception as me:
+            logger.error(f"Failed to check/migrate social_accounts table schema: {me}")
+
+        try:
+            inspector = sqlalchemy.inspect(engine)
+            if "social_targets" in inspector.get_table_names():
+                columns = [c["name"] for c in inspector.get_columns("social_targets")]
+                if "profile_picture" not in columns:
+                    conn.execute(sqlalchemy.text("ALTER TABLE social_targets ADD COLUMN profile_picture VARCHAR"))
+                    logger.info("Migrated schema: Added column profile_picture to social_targets table")
+        except Exception as me:
+            logger.error(f"Failed to check/migrate social_targets table schema: {me}")
     
     # Start RabbitMQ subscriptions in background task with retry
     async def setup_subscriptions_loop():
@@ -406,6 +663,44 @@ async def create_post(post_data: PostCreate, user_id: str):
     from datetime import timezone as dt_timezone
     from services.post_orchestrator.media import process_and_mix_media
     
+    # Resolve Targets
+    targets_to_create = []
+    platforms_to_post = []
+    if post_data.target_ids:
+        from libs.common.db_models import SocialTarget, SocialAccount
+        import sqlalchemy
+        target_rows_query = sqlalchemy.select(
+            SocialTarget.c.target_id,
+            SocialTarget.c.platform
+        ).select_from(
+            SocialTarget.join(SocialAccount, SocialTarget.c.account_id == SocialAccount.c.id)
+        ).where(
+            (SocialAccount.c.user_id == user_id) &
+            (SocialTarget.c.target_id.in_(post_data.target_ids))
+        )
+        rows = await database.fetch_all(target_rows_query)
+        if not rows:
+            raise HTTPException(status_code=400, detail="No valid social targets found matching the target_ids for this user.")
+        
+        platforms_set = set()
+        for row in rows:
+            targets_to_create.append({
+                "platform": row["platform"],
+                "target_id": row["target_id"]
+            })
+            platforms_set.add(row["platform"])
+        platforms_to_post = list(platforms_set)
+    else:
+        if not post_data.platforms:
+            raise HTTPException(status_code=400, detail="Either platforms or target_ids must be specified.")
+        for platform in post_data.platforms:
+            platform_str = platform.value if hasattr(platform, "value") else str(platform)
+            targets_to_create.append({
+                "platform": platform_str,
+                "target_id": None
+            })
+            platforms_to_post.append(platform_str)
+
     # Validate scheduled_at if provided
     sched_utc = None
     if post_data.scheduled_at:
@@ -485,16 +780,17 @@ async def create_post(post_data: PostCreate, user_id: str):
         
         await log_post_stage(
             database, post['id'], "orchestrator", "post_created", "INFO",
-            f"Post created with background processing job {job_id}. Targets: {[p.value if hasattr(p, 'value') else str(p) for p in post_data.platforms]}"
+            f"Post created with background processing job {job_id}. Targets: {platforms_to_post}"
         )
         
         # Store Metadata (Targets)
-        for platform in post_data.platforms:
+        for target in targets_to_create:
             target_query = PostTarget.insert().values(
                 id=uuid.uuid4(),
                 post_id=post['id'],
-                platform=platform.value if hasattr(platform, "value") else str(platform),
-                status="pending"
+                platform=target["platform"],
+                status="pending",
+                target_id=target["target_id"]
             )
             await database.execute(target_query)
             
@@ -504,7 +800,7 @@ async def create_post(post_data: PostCreate, user_id: str):
             content=post['content'],
             media_key=get_presigned_download_url(post['media_key']),
             media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
-            platforms=post_data.platforms,
+            platforms=[Platform(p) for p in platforms_to_post if p in [pl.value for pl in Platform]],
             is_reel=post['is_reel'],
             status=PostStatus(post['status']),
             created_at=post['created_at'],
@@ -559,34 +855,41 @@ async def create_post(post_data: PostCreate, user_id: str):
     
     await log_post_stage(
         database, post['id'], "orchestrator", "post_created", "INFO",
-        f"Post created in database. Targets: {[p.value if hasattr(p, 'value') else str(p) for p in post_data.platforms]}"
+        f"Post created in database. Targets: {platforms_to_post}"
     )
     
     # 2. Store Metadata (Targets)
-    for platform in post_data.platforms:
+    for target in targets_to_create:
         target_query = PostTarget.insert().values(
             id=uuid.uuid4(),
             post_id=post['id'],
-            platform=platform.value if hasattr(platform, "value") else str(platform),
-            status="pending"
+            platform=target["platform"],
+            status="pending",
+            target_id=target["target_id"]
         )
         await database.execute(target_query)
         
     # 3. Publish Events if NOT scheduled
     if not post_data.scheduled_at:
         failed_platforms = []
-        for platform in post_data.platforms:
-            platform_str = platform.value if hasattr(platform, "value") else str(platform)
+        for target in targets_to_create:
+            platform_str = target["platform"]
             try:
+                try:
+                    platform_enum = Platform(platform_str)
+                except ValueError:
+                    platform_enum = platform_str
+                
                 await publish_post_event(
                     post_id=post['id'], 
-                    platform=platform, 
+                    platform=platform_enum, 
                     content=post_data.content, 
                     media_key=post_data.media_key, 
                     user_id=user_id,
                     media_keys=post_data.media_keys,
                     is_reel=post_data.is_reel,
-                    facebook_page_id=post_data.facebook_page_id
+                    facebook_page_id=post_data.facebook_page_id,
+                    target_id=target["target_id"]
                 )
                 # Only emit event_published lifecycle stage after confirmed publish success
                 await log_post_stage(
@@ -616,7 +919,7 @@ async def create_post(post_data: PostCreate, user_id: str):
         content=post['content'],
         media_key=get_presigned_download_url(post['media_key']),
         media_keys=[get_presigned_download_url(k) for k in json.loads(post['media_keys'])] if post['media_keys'] else None,
-        platforms=post_data.platforms,
+        platforms=[Platform(p) for p in platforms_to_post if p in [pl.value for pl in Platform]],
         is_reel=post['is_reel'],
         status=PostStatus(post['status']),
         created_at=post['created_at'],
@@ -1245,3 +1548,162 @@ async def mark_all_notifications_read(user_id: str):
     query = Notification.update().where(Notification.c.user_id == user_id).values(read=True)
     await database.execute(query)
     return {"status": "success"}
+
+
+# --- Multi-Account Management Endpoints ---
+
+from pydantic import BaseModel
+from typing import List
+
+class UpdatePreferencesPayload(BaseModel):
+    preferred_target_ids: List[str]
+
+
+@app.get("/connections")
+async def get_connections(user_id: str):
+    from libs.common.db_models import SocialAccount, SocialTarget
+    import sqlalchemy
+
+    # Fetch accounts
+    accounts_query = SocialAccount.select().where(SocialAccount.c.user_id == user_id)
+    accounts = await database.fetch_all(accounts_query)
+
+    # Fetch targets
+    targets_query = SocialTarget.select().where(
+        SocialTarget.c.account_id.in_([acc["id"] for acc in accounts])
+    ) if accounts else None
+
+    targets = await database.fetch_all(targets_query) if targets_query is not None else []
+
+    # Map targets by account_id
+    targets_by_account = {}
+    for tgt in targets:
+        acc_id = tgt["account_id"]
+        if acc_id not in targets_by_account:
+            targets_by_account[acc_id] = []
+        targets_by_account[acc_id].append({
+            "id": str(tgt["id"]),
+            "target_id": tgt["target_id"],
+            "target_name": tgt["target_name"],
+            "target_type": tgt["target_type"],
+            "platform": tgt["platform"],
+            "is_preferred": tgt["is_preferred"],
+            "profile_picture": tgt["profile_picture"]
+        })
+
+    result = []
+    for acc in accounts:
+        acc_id = acc["id"]
+        result.append({
+            "id": acc_id,
+            "platform": acc["platform"],
+            "username": acc["username"],
+            "display_name": acc["display_name"],
+            "profile_picture": acc["profile_picture"],
+            "created_at": acc["created_at"].isoformat() if acc["created_at"] else None,
+            "targets": targets_by_account.get(acc_id, [])
+        })
+
+    return result
+
+
+@app.delete("/connections/{account_id}")
+async def disconnect_account(account_id: str, user_id: str):
+    import uuid
+    from libs.common.db_models import SocialAccount, SocialTarget, OAuthToken, TokenRefreshMetadata
+    try:
+        acc_uuid = uuid.UUID(account_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid account_id format")
+
+    # Verify ownership
+    check_query = SocialAccount.select().where(
+        (SocialAccount.c.id == acc_uuid) & (SocialAccount.c.user_id == user_id)
+    )
+    acc = await database.fetch_one(check_query)
+    if not acc:
+        raise HTTPException(status_code=404, detail="Account not found or unauthorized")
+
+    # Delete related targets
+    await database.execute(SocialTarget.delete().where(SocialTarget.c.account_id == acc_uuid))
+    # Delete related refresh metadata
+    await database.execute(TokenRefreshMetadata.delete().where(TokenRefreshMetadata.c.account_id == acc_uuid))
+    # Delete related oauth token
+    await database.execute(OAuthToken.delete().where(OAuthToken.c.account_id == acc_uuid))
+    # Delete account
+    await database.execute(SocialAccount.delete().where(SocialAccount.c.id == acc_uuid))
+
+    return {"status": "success", "message": "Account disconnected successfully"}
+
+
+@app.get("/connections/targets")
+async def get_all_targets(user_id: str):
+    from libs.common.db_models import SocialAccount, SocialTarget
+    import sqlalchemy
+
+    query = sqlalchemy.select(
+        SocialTarget.c.id,
+        SocialTarget.c.target_id,
+        SocialTarget.c.target_name,
+        SocialTarget.c.target_type,
+        SocialTarget.c.platform,
+        SocialTarget.c.is_preferred,
+        SocialTarget.c.profile_picture,
+        SocialAccount.c.display_name.label("account_name"),
+        SocialAccount.c.username.label("account_username")
+    ).select_from(
+        SocialTarget.join(SocialAccount, SocialTarget.c.account_id == SocialAccount.c.id)
+    ).where(
+        SocialAccount.c.user_id == user_id
+    )
+    
+    targets = await database.fetch_all(query)
+    return [
+        {
+            "id": str(t["id"]),
+            "target_id": t["target_id"],
+            "target_name": t["target_name"],
+            "target_type": t["target_type"],
+            "platform": t["platform"],
+            "is_preferred": t["is_preferred"],
+            "profile_picture": t["profile_picture"],
+            "account_name": t["account_name"],
+            "account_username": t["account_username"]
+        }
+        for t in targets
+    ]
+
+
+@app.put("/connections/preferences")
+async def update_target_preferences(payload: UpdatePreferencesPayload, user_id: str):
+    from libs.common.db_models import SocialAccount, SocialTarget
+    import sqlalchemy
+
+    # Fetch all target IDs belonging to the user's connected accounts to ensure security/ownership
+    user_targets_query = sqlalchemy.select(SocialTarget.c.target_id).select_from(
+        SocialTarget.join(SocialAccount, SocialTarget.c.account_id == SocialAccount.c.id)
+    ).where(
+        SocialAccount.c.user_id == user_id
+    )
+    user_targets_rows = await database.fetch_all(user_targets_query)
+    allowed_target_ids = {row["target_id"] for row in user_targets_rows}
+
+    # Filter to only allowed IDs
+    target_ids_to_prefer = [tid for tid in payload.preferred_target_ids if tid in allowed_target_ids]
+
+    # Set all of user's targets to preferred = False
+    deactivate_query = SocialTarget.update().where(
+        SocialTarget.c.account_id.in_(
+            sqlalchemy.select(SocialAccount.c.id).where(SocialAccount.c.user_id == user_id)
+        )
+    ).values(is_preferred=False)
+    await database.execute(deactivate_query)
+
+    # Set specified targets to preferred = True
+    if target_ids_to_prefer:
+        activate_query = SocialTarget.update().where(
+            SocialTarget.c.target_id.in_(target_ids_to_prefer)
+        ).values(is_preferred=True)
+        await database.execute(activate_query)
+
+    return {"status": "success", "message": "Preferences updated successfully"}

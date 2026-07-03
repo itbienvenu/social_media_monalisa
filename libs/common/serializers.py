@@ -22,7 +22,8 @@ class PostBase(BaseModel):
     content: str
     media_key: Optional[str] = None
     media_keys: Optional[List[str]] = None
-    platforms: List[Platform]
+    platforms: Optional[List[Platform]] = None
+    target_ids: Optional[List[str]] = None
     is_reel: Optional[bool] = False
     facebook_page_id: Optional[str] = None
     audio_key: Optional[str] = None

@@ -85,6 +85,9 @@ services:
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-secret}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-secret}
+      - BASE_URL=${BASE_URL:-http://localhost:8000}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
     depends_on:
       - db
     volumes:

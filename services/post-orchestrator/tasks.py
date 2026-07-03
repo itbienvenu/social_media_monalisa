@@ -132,7 +132,8 @@ async def process_media_task(ctx, job_id: str, user_id: str, media_keys: list, a
                     user_id=user_id,
                     media_keys=final_media_keys,
                     is_reel=is_reel,
-                    facebook_page_id=facebook_page_id
+                    facebook_page_id=facebook_page_id,
+                    target_id=target["target_id"]
                 )
                 
                 await log_post_stage(
@@ -324,7 +325,8 @@ async def check_scheduled_posts(ctx):
                     user_id=user_id,
                     media_keys=m_keys,
                     is_reel=post["is_reel"],
-                    facebook_page_id=post.get("facebook_page_id")
+                    facebook_page_id=post.get("facebook_page_id"),
+                    target_id=target["target_id"]
                 )
                 
                 await log_post_stage(

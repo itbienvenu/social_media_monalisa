@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://subacidly-ungrilled-rosy.ngrok-free.dev",
 ]
 
 env_base_url = os.getenv("BASE_URL")

@@ -120,13 +120,14 @@ export default function PostPage() {
     const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
     const [manualSlideIndex, setManualSlideIndex] = useState(0);
 
-    // Facebook Pages target selection
-    const [facebookPages, setFacebookPages] = useState<{ target_id: string; target_name: string }[]>([]);
-    const [selectedFacebookPage, setSelectedFacebookPage] = useState<string>('');
-    const [loadingPages, setLoadingPages] = useState<boolean>(false);
+    // Social accounts & publishing targets
+    const [targets, setTargets] = useState<any[]>([]);
+    const [selectedTargetIds, setSelectedTargetIds] = useState<string[]>([]);
+    const [loadingTargets, setLoadingTargets] = useState(true);
+    const [savingPrefs, setSavingPrefs] = useState(false);
 
     // Account connections
-    const [connections, setConnections] = useState<{ platform: string; connected: boolean }[]>([]);
+    const [connections, setConnections] = useState<any[]>([]);
     const [loadingConnections, setLoadingConnections] = useState(true);
     const [userProfile, setUserProfile] = useState<any>(null);
 
@@ -142,16 +143,25 @@ export default function PostPage() {
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
-    // Fetch Connections and Profile info
+    // Fetch Connections, Targets, and Profile info
     useEffect(() => {
         const fetchMetadata = async () => {
             try {
-                const [connRes, profileRes] = await Promise.all([
+                const [connRes, targetsRes, profileRes] = await Promise.all([
                     apiFetch(`${API_URL}/connections`),
+                    apiFetch(`${API_URL}/connections/targets`),
                     apiFetch(`${API_URL}/auth/me`)
                 ]);
                 if (connRes.ok) {
                     setConnections(await connRes.json());
+                }
+                if (targetsRes.ok) {
+                    const targetsData = await targetsRes.json();
+                    setTargets(targetsData);
+                    const preferred = targetsData.filter((t: any) => t.is_preferred).map((t: any) => t.target_id);
+                    setSelectedTargetIds(preferred);
+                    const uniquePlats = Array.from(new Set(targetsData.filter((t: any) => preferred.includes(t.target_id)).map((t: any) => t.platform))) as string[];
+                    setPlatforms(uniquePlats);
                 }
                 if (profileRes.ok) {
                     setUserProfile(await profileRes.json());
@@ -160,6 +170,7 @@ export default function PostPage() {
                 console.error("Failed to fetch connection metadata:", err);
             } finally {
                 setLoadingConnections(false);
+                setLoadingTargets(false);
             }
         };
         fetchMetadata();
@@ -276,33 +287,44 @@ export default function PostPage() {
         }
     };
 
-    const fetchFacebookPages = async () => {
-        setLoadingPages(true);
-        try {
-            const res = await apiFetch(`${API_URL}/facebook/targets`);
-            if (res.ok) {
-                const data = await res.json();
-                const pagesOnly = data.filter((t: any) => t.target_type === 'page');
-                setFacebookPages(pagesOnly);
-                if (pagesOnly.length > 0) {
-                    setSelectedFacebookPage(pagesOnly[0].target_id);
-                }
-            }
-        } catch (err) {
-            console.error("Failed to fetch Facebook pages:", err);
-        } finally {
-            setLoadingPages(false);
-        }
-    };
-
-    const togglePlatform = (p: string) => {
-        setPlatforms(prev => {
-            const next = prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p];
-            if (p === 'facebook' && next.includes('facebook') && facebookPages.length === 0) {
-                fetchFacebookPages();
-            }
+    const toggleTarget = (targetId: string) => {
+        setSelectedTargetIds(prev => {
+            const next = prev.includes(targetId) ? prev.filter(x => x !== targetId) : [...prev, targetId];
+            // Update platforms array for preview
+            const selectedTargetsPlats = targets
+                .filter(t => next.includes(t.target_id))
+                .map(t => t.platform);
+            setPlatforms(Array.from(new Set(selectedTargetsPlats)));
             return next;
         });
+    };
+
+    const savePreferredTargets = async () => {
+        setSavingPrefs(true);
+        try {
+            const res = await apiFetch(`${API_URL}/connections/preferences`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ preferred_target_ids: selectedTargetIds })
+            });
+            if (res.ok) {
+                alert("Preferred targets updated successfully!");
+                // Update target preferences locally
+                setTargets(prev => prev.map(t => ({
+                    ...t,
+                    is_preferred: selectedTargetIds.includes(t.target_id)
+                })));
+            } else {
+                alert("Failed to save preferences: " + await res.text());
+            }
+        } catch (e) {
+            console.error("Error saving target preferences:", e);
+            alert("Error saving preferences");
+        } finally {
+            setSavingPrefs(false);
+        }
     };
 
     const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -396,8 +418,8 @@ export default function PostPage() {
             return;
         }
 
-        if (platforms.length === 0) {
-            alert("Select at least one platform");
+        if (selectedTargetIds.length === 0) {
+            alert("Select at least one publishing target");
             return;
         }
 
@@ -449,8 +471,8 @@ export default function PostPage() {
                     media_key: finalMediaUrls[0] || mediaUrl || undefined,
                     media_keys: finalMediaUrls.length > 0 ? finalMediaUrls : (mediaUrl ? [mediaUrl] : undefined),
                     platforms: platforms,
+                    target_ids: selectedTargetIds,
                     is_reel: isReel,
-                    facebook_page_id: platforms.includes('facebook') && selectedFacebookPage ? selectedFacebookPage : undefined,
                     audio_key: finalAudioUrl || undefined,
                     music_volume: musicVolume,
                     video_volume: videoVolume,
@@ -548,8 +570,7 @@ export default function PostPage() {
     };
 
     const isPlatformConnected = (platformName: string) => {
-        const conn = connections.find(c => c.platform === platformName);
-        return conn ? conn.connected : false;
+        return connections.some(c => c.platform === platformName);
     };
 
     return (
@@ -718,47 +739,93 @@ export default function PostPage() {
                         {/* LEFT COLUMN: EDITOR FORM */}
                         <div className="lg:col-span-7 space-y-6">
                             
-                            {/* Select Platforms Card */}
-                            <div className="bg-white border border-gray-150 p-6 rounded-2xl shadow-sm space-y-3.5">
-                                <h3 className="text-xs font-black uppercase tracking-wider text-gray-400">
-                                    Select Platforms
-                                </h3>
+                            {/* Select Publishing Targets Card */}
+                            <div className="bg-white border border-gray-150 p-6 rounded-2xl shadow-sm space-y-4">
+                                <div className="flex justify-between items-center">
+                                    <div>
+                                        <h3 className="text-xs font-black uppercase tracking-wider text-gray-400">
+                                            Select Accounts & Targets
+                                        </h3>
+                                        <p className="text-[10px] text-gray-450 font-semibold mt-0.5">
+                                            Select one or more connected accounts/pages to publish to
+                                        </p>
+                                    </div>
+                                    {selectedTargetIds.length > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={savePreferredTargets}
+                                            disabled={savingPrefs}
+                                            className="text-[10px] bg-[#FF4747]/10 hover:bg-[#FF4747]/20 text-[#FF4747] font-bold py-1.5 px-3 rounded-lg transition-all"
+                                        >
+                                            {savingPrefs ? "Saving..." : "Save Selection as Default"}
+                                        </button>
+                                    )}
+                                </div>
                                 
-                                {loadingConnections ? (
-                                    <p className="text-xs text-gray-400 animate-pulse font-semibold">Checking connected accounts...</p>
+                                {loadingTargets ? (
+                                    <p className="text-xs text-gray-400 animate-pulse font-semibold">Loading connected targets...</p>
+                                ) : targets.length === 0 ? (
+                                    <div className="text-xs text-amber-700 bg-amber-50 border border-amber-250 p-4 rounded-xl font-bold flex flex-col items-center gap-2">
+                                        <span>No connected publishing targets found.</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => router.push('/dashboard?tab=connect')}
+                                            className="text-xs bg-[#FF4747] text-white px-3 py-1.5 rounded-lg font-bold"
+                                        >
+                                            Connect Social Accounts
+                                        </button>
+                                    </div>
                                 ) : (
-                                    <div className="flex gap-2.5 flex-wrap">
-                                        {[
-                                            { id: 'facebook', name: 'Facebook', icon: <FacebookIcon /> },
-                                            { id: 'instagram', name: 'Instagram', icon: <InstagramIcon /> },
-                                            { id: 'linkedin', name: 'LinkedIn', icon: <LinkedInIcon /> },
-                                            { id: 'tiktok', name: 'TikTok', icon: <TikTokIcon /> }
-                                        ].map(p => {
-                                            const isConnected = isPlatformConnected(p.id);
-                                            const isSelected = platforms.includes(p.id);
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        {targets.map(target => {
+                                            const isSelected = selectedTargetIds.includes(target.target_id);
+                                            const platformName = target.platform.toLowerCase();
+                                            const icon = 
+                                                platformName === 'facebook' ? '📘' :
+                                                platformName === 'instagram' ? '📸' :
+                                                platformName === 'linkedin' ? '💼' : '🎵';
                                             
                                             return (
-                                                <button
-                                                    key={p.id}
-                                                    type="button"
-                                                    disabled={!isConnected}
-                                                    onClick={() => togglePlatform(p.id)}
-                                                    className={`inline-flex items-center px-4 py-2 rounded-full border text-xs font-bold transition-all cursor-pointer select-none active:scale-95 ${
-                                                        !isConnected 
-                                                            ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed opacity-55' 
-                                                            : isSelected
-                                                                ? 'bg-[#FF4747]/10 border-[#FF4747] text-[#FF4747] ring-1 ring-[#FF4747]/20 shadow-sm'
-                                                                : 'bg-white border-gray-200 text-gray-700 hover:border-[#FF4747] hover:text-[#FF4747] hover:bg-slate-50/50'
+                                                <div
+                                                    key={target.id}
+                                                    onClick={() => toggleTarget(target.target_id)}
+                                                    className={`p-3.5 border rounded-xl flex items-center justify-between cursor-pointer select-none transition-all ${
+                                                        isSelected
+                                                            ? 'bg-[#FF4747]/5 border-[#FF4747] ring-1 ring-[#FF4747]/10'
+                                                            : 'bg-white border-gray-200 hover:border-gray-300'
                                                     }`}
                                                 >
-                                                    {p.icon}
-                                                    <span>{p.name}</span>
-                                                    {!isConnected && (
-                                                        <span className="ml-1.5 text-[8px] uppercase tracking-wider font-extrabold text-gray-400 bg-gray-100 px-1 py-0.5 rounded">
-                                                            Offline
-                                                        </span>
-                                                    )}
-                                                </button>
+                                                    <div className="flex items-center space-x-3 min-w-0">
+                                                        {target.profile_picture ? (
+                                                            <img
+                                                                src={target.profile_picture}
+                                                                alt=""
+                                                                className="w-8 h-8 rounded-full object-cover border border-gray-100"
+                                                                onError={(e) => { (e.target as any).style.display = 'none'; }}
+                                                            />
+                                                        ) : (
+                                                            <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-sm">
+                                                                {icon}
+                                                            </div>
+                                                        )}
+                                                        <div className="min-w-0">
+                                                            <p className="text-xs font-bold text-gray-800 truncate">{target.target_name}</p>
+                                                            <p className="text-[9px] text-gray-405 font-semibold uppercase tracking-wider">
+                                                                {target.platform} • {target.target_type}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        {target.is_preferred && (
+                                                            <span className="text-[10px] text-amber-500 font-bold" title="Preferred target">★</span>
+                                                        )}
+                                                        <div className={`w-4 h-4 rounded-md border flex items-center justify-center ${
+                                                            isSelected ? 'bg-[#FF4747] border-[#FF4747] text-white' : 'border-gray-300'
+                                                        }`}>
+                                                            {isSelected && <span className="text-[10px] font-black leading-none">✓</span>}
+                                                        </div>
+                                                    </div>
+                                                </div>
                                             );
                                         })}
                                     </div>
@@ -1116,33 +1183,6 @@ export default function PostPage() {
                                             </div>
                                         )}
 
-                                        {/* Facebook Page Selection */}
-                                        {platforms.includes('facebook') && (
-                                            <div className="bg-slate-50/60 border border-gray-200 rounded-xl p-4 space-y-2">
-                                                <label className="block text-[10px] font-black uppercase tracking-wider text-gray-400">
-                                                    Publishing Target for Facebook
-                                                </label>
-                                                {loadingPages ? (
-                                                    <p className="text-xs text-gray-400 animate-pulse font-semibold">Loading pages...</p>
-                                                ) : facebookPages.length > 0 ? (
-                                                    <select
-                                                        value={selectedFacebookPage}
-                                                        onChange={e => setSelectedFacebookPage(e.target.value)}
-                                                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold focus:ring-2 focus:ring-[#FF4747]/10"
-                                                    >
-                                                        {facebookPages.map(page => (
-                                                            <option key={page.target_id} value={page.target_id}>
-                                                                {page.target_name} ({page.target_id})
-                                                            </option>
-                                                        ))}
-                                                    </select>
-                                                ) : (
-                                                    <div className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 p-3 rounded-lg font-bold">
-                                                        No connected Facebook Pages found. Try reconnecting under "Connect Accounts" to verify page permissions.
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
 
                                         {/* Manual URL Input */}
                                         <div className="space-y-2">

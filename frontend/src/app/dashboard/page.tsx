@@ -119,12 +119,12 @@ const TiktokIcon = () => (
   </svg>
 );
 
-const StatusBadge = ({ connected }: { connected: boolean }) => {
+const StatusBadge = ({ connected, count }: { connected: boolean; count?: number }) => {
   if (connected) {
     return (
       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-green-50 text-green-700 border border-green-100">
         <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-        Connected
+        {count && count > 1 ? `${count} Accounts Connected` : 'Connected'}
       </span>
     );
   }
@@ -343,21 +343,64 @@ function DashboardContent() {
         }
     };
 
-    const handleDisconnect = async (platform: string) => {
-        if (!confirm(`Are you sure you want to disconnect ${platform}?`)) return;
+    const handleDisconnect = async (accountId: string, displayName: string) => {
+        if (!confirm(`Are you sure you want to disconnect ${displayName}?`)) return;
 
-        setDisconnectLoading(platform);
+        setDisconnectLoading(accountId);
         try {
-            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/connections/${platform}`, {
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/connections/${accountId}`, {
                 method: 'DELETE'
             });
             if (res.ok) {
-                setConnections(prev => prev.map(c => c.platform === platform ? { ...c, connected: false } : c));
+                setConnections(prev => prev.filter(c => c.id !== accountId));
             }
         } catch (e) {
-            console.error(e);
+            console.error("Failed to disconnect account:", e);
         } finally {
             setDisconnectLoading(null);
+        }
+    };
+
+    const handleTogglePreference = async (targetId: string, currentIsPreferred: boolean) => {
+        let preferredIds: string[] = [];
+        connections.forEach(conn => {
+            if (conn.targets) {
+                conn.targets.forEach((tgt: any) => {
+                    if (tgt.is_preferred) {
+                        if (tgt.target_id !== targetId) {
+                            preferredIds.push(tgt.target_id);
+                        }
+                    } else {
+                        if (tgt.target_id === targetId) {
+                            preferredIds.push(tgt.target_id);
+                        }
+                    }
+                });
+            }
+        });
+
+        try {
+            const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL}/connections/preferences`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preferred_target_ids: preferredIds })
+            });
+            if (res.ok) {
+                setConnections(prev => prev.map(conn => {
+                    if (!conn.targets) return conn;
+                    return {
+                        ...conn,
+                        targets: conn.targets.map((tgt: any) => {
+                            if (tgt.target_id === targetId) {
+                                return { ...tgt, is_preferred: !currentIsPreferred };
+                            }
+                            return tgt;
+                        })
+                    };
+                }));
+            }
+        } catch (e) {
+            console.error("Error setting target preference:", e);
         }
     };
 
@@ -742,9 +785,9 @@ function DashboardContent() {
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             {['facebook', 'instagram', 'linkedin', 'tiktok'].map((platform) => {
                                 const details = platformDetails[platform];
-                                const connected = isPlatformConnected(platform);
+                                const platformAccs = connections.filter(c => c.platform === platform);
+                                const connected = platformAccs.length > 0;
                                 const isConnecting = connectLoading === platform;
-                                const isDisconnecting = disconnectLoading === platform;
 
                                 return (
                                     <div 
@@ -757,7 +800,7 @@ function DashboardContent() {
                                                 <div className="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center shadow-inner border border-gray-100">
                                                     {details.icon}
                                                 </div>
-                                                <StatusBadge connected={connected} />
+                                                <StatusBadge connected={connected} count={platformAccs.length} />
                                             </div>
 
                                             {/* Card Middle: Platform Info */}
@@ -776,48 +819,121 @@ function DashboardContent() {
 
                                         {/* Card Action Button */}
                                         <div>
-                                            {connected ? (
-                                                <button
-                                                    onClick={() => handleDisconnect(platform)}
-                                                    disabled={isDisconnecting || isConnecting}
-                                                    className="w-full border border-[#FF4747] text-[#FF4747] hover:bg-[#FF4747]/5 active:scale-[0.99] transition-all py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center disabled:opacity-50 cursor-pointer"
-                                                >
-                                                    {isDisconnecting ? (
-                                                        <span className="flex items-center gap-1">
-                                                            <svg className="animate-spin h-4 w-4 text-[#FF4747]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                                            </svg>
-                                                            Disconnecting...
-                                                        </span>
-                                                    ) : 'Disconnect'}
-                                                </button>
-                                            ) : (
-                                                <button
-                                                    onClick={() => handleConnect(platform)}
-                                                    disabled={isConnecting || isDisconnecting}
-                                                    className="w-full border border-gray-200 hover:border-[#FF4747] text-gray-700 hover:text-[#FF4747] hover:bg-[#FF4747]/5 active:scale-[0.99] transition-all py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center disabled:opacity-50 cursor-pointer"
-                                                >
-                                                    {isConnecting ? (
-                                                        <span className="flex items-center gap-1">
-                                                            <svg className="animate-spin h-4 w-4 text-[#FF4747]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                                            </svg>
-                                                            Connecting...
-                                                        </span>
-                                                    ) : (
-                                                        <>
-                                                            <ArrowInIcon />
-                                                            Connect {details.title}
-                                                        </>
-                                                    )}
-                                                </button>
-                                            )}
+                                            <button
+                                                onClick={() => handleConnect(platform)}
+                                                disabled={isConnecting}
+                                                className="w-full border border-gray-200 hover:border-[#FF4747] text-gray-700 hover:text-[#FF4747] hover:bg-[#FF4747]/5 active:scale-[0.99] transition-all py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center disabled:opacity-50 cursor-pointer"
+                                            >
+                                                {isConnecting ? (
+                                                    <span className="flex items-center gap-1">
+                                                        <svg className="animate-spin h-4 w-4 text-[#FF4747]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                        </svg>
+                                                        Connecting...
+                                                    </span>
+                                                ) : (
+                                                    <>
+                                                        <ArrowInIcon />
+                                                        {connected ? 'Link Another Account' : `Connect ${details.title}`}
+                                                    </>
+                                                )}
+                                            </button>
                                         </div>
                                     </div>
                                 );
                             })}
+                        </div>
+
+                        {/* Active Social Connections Section */}
+                        <div className="bg-white border border-gray-150 rounded-2xl p-6 shadow-sm space-y-6">
+                            <div>
+                                <h2 className="text-lg font-bold text-gray-900 mb-1">Active Connections</h2>
+                                <p className="text-xs text-gray-400 font-semibold">Manage your connected platform accounts, publishing targets and target preferences.</p>
+                            </div>
+
+                            {connections.length === 0 ? (
+                                <div className="text-center py-8 border border-dashed border-gray-200 rounded-xl text-gray-400 font-semibold text-xs">
+                                    No social accounts connected yet. Link an account using the cards above.
+                                </div>
+                            ) : (
+                                <div className="divide-y divide-gray-100 space-y-6">
+                                    {connections.map((conn) => (
+                                        <div key={conn.id} className="pt-6 first:pt-0 space-y-4">
+                                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                                                <div className="flex items-center gap-3">
+                                                    {conn.profile_picture ? (
+                                                        <img src={conn.profile_picture} alt={conn.display_name || conn.username} className="w-10 h-10 rounded-full object-cover border border-gray-200" />
+                                                    ) : (
+                                                        <div className="w-10 h-10 rounded-full bg-gray-100 border border-gray-200 flex items-center justify-center font-bold text-gray-500 capitalize text-sm">
+                                                            {(conn.display_name || conn.username || conn.platform)[0]}
+                                                        </div>
+                                                    )}
+                                                    <div>
+                                                        <div className="flex items-center gap-2">
+                                                            <h4 className="text-sm font-bold text-gray-900">{conn.display_name || conn.username}</h4>
+                                                            <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-gray-100 text-gray-500 border border-gray-150 capitalize">
+                                                                {conn.platform}
+                                                            </span>
+                                                        </div>
+                                                        <p className="text-[10px] text-gray-400 font-semibold tracking-tight">Account ID: {conn.id}</p>
+                                                    </div>
+                                                </div>
+
+                                                <button
+                                                    onClick={() => handleDisconnect(conn.id, conn.display_name || conn.username || conn.platform)}
+                                                    disabled={disconnectLoading === conn.id}
+                                                    className="border border-red-200 text-red-600 hover:bg-red-50 py-1.5 px-3 rounded-lg text-xs font-bold transition-all disabled:opacity-50 active:scale-95 cursor-pointer flex items-center gap-1.5"
+                                                >
+                                                    {disconnectLoading === conn.id ? (
+                                                        <svg className="animate-spin h-3.5 w-3.5 text-red-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                        </svg>
+                                                    ) : null}
+                                                    Disconnect
+                                                </button>
+                                            </div>
+
+                                            {/* Targets / Pages under this account */}
+                                            {conn.targets && conn.targets.length > 0 && (
+                                                <div className="pl-4 sm:pl-12 border-l-2 border-gray-100 space-y-2">
+                                                    <p className="text-[9px] font-black uppercase tracking-wider text-gray-400">Linked Targets & Pages</p>
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                        {conn.targets.map((tgt: any) => (
+                                                            <div key={tgt.id} className="flex items-center justify-between p-3 bg-slate-50/60 border border-gray-150 rounded-xl hover:bg-slate-50 transition-colors">
+                                                                <div className="flex items-center gap-3">
+                                                                    {tgt.profile_picture ? (
+                                                                        <img src={tgt.profile_picture} alt={tgt.target_name} className="w-8 h-8 rounded-full object-cover border border-gray-200" />
+                                                                    ) : (
+                                                                        <div className="w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-xs font-bold text-gray-400 capitalize">
+                                                                            {tgt.target_name[0]}
+                                                                        </div>
+                                                                    )}
+                                                                    <div>
+                                                                        <p className="text-xs font-bold text-gray-800 leading-tight">{tgt.target_name}</p>
+                                                                        <p className="text-[10px] text-gray-400 font-semibold capitalize leading-none mt-0.5">{tgt.target_type}</p>
+                                                                    </div>
+                                                                </div>
+
+                                                                <button
+                                                                    onClick={() => handleTogglePreference(tgt.target_id, tgt.is_preferred)}
+                                                                    className={`p-1.5 rounded-lg border transition-all cursor-pointer ${tgt.is_preferred ? 'bg-amber-50 border-amber-200 text-amber-500' : 'bg-white border-gray-200 text-gray-400 hover:text-amber-500 hover:border-amber-200'}`}
+                                                                    title={tgt.is_preferred ? "Remove preferred publishing target" : "Mark as preferred publishing target"}
+                                                                >
+                                                                    <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                                                                        <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" />
+                                                                    </svg>
+                                                                </button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
 
                         {/* Secure Connection Shield Card */}

@@ -86,26 +86,57 @@ async def handle_post_event(message: dict):
     )
     
     # Fetch Page Token (Target)
-    # Strategy: Find the target page specified, or default to the first 'page' target for this user
+    from libs.common.db_models import SocialTarget as CentralSocialTarget, SocialAccount as CentralSocialAccount
+    from libs.common.security import decrypt_token
+    import sqlalchemy
+
     facebook_page_id = message.get("facebook_page_id")
     target = None
+    decrypted_token = None
+    target_id = None
+
     if facebook_page_id:
-        query = SocialTarget.select().where(
-            (SocialTarget.c.user_id == user_id) & 
-            (SocialTarget.c.target_id == facebook_page_id) &
-            (SocialTarget.c.target_type == "page")
+        query = sqlalchemy.select(
+            CentralSocialTarget.c.target_id,
+            CentralSocialTarget.c.access_token
+        ).select_from(
+            CentralSocialTarget.join(CentralSocialAccount, CentralSocialTarget.c.account_id == CentralSocialAccount.c.id)
+        ).where(
+            (CentralSocialAccount.c.user_id == user_id) &
+            (CentralSocialTarget.c.target_id == facebook_page_id) &
+            (CentralSocialTarget.c.platform == "facebook")
         )
         target = await database.fetch_one(query)
-        
+
     if not target:
-        query = SocialTarget.select().where(
+        # Try to find any facebook page in central targets first
+        query = sqlalchemy.select(
+            CentralSocialTarget.c.target_id,
+            CentralSocialTarget.c.access_token
+        ).select_from(
+            CentralSocialTarget.join(CentralSocialAccount, CentralSocialTarget.c.account_id == CentralSocialAccount.c.id)
+        ).where(
+            (CentralSocialAccount.c.user_id == user_id) &
+            (CentralSocialTarget.c.platform == "facebook")
+        )
+        target = await database.fetch_one(query)
+
+    if target:
+        decrypted_token = decrypt_token(target['access_token'])
+        target_id = target['target_id']
+    else:
+        # Fallback to local legacy table
+        legacy_query = SocialTarget.select().where(
             (SocialTarget.c.user_id == user_id) & 
             (SocialTarget.c.target_type == "page")
         )
-        target = await database.fetch_one(query)
-    
-    if target:
-        await post_to_facebook(post_id, content, target['access_token'], target['target_id'], media_url=media_url, media_urls=media_urls, is_reel=is_reel)
+        legacy_target = await database.fetch_one(legacy_query)
+        if legacy_target:
+            decrypted_token = legacy_target['access_token']
+            target_id = legacy_target['target_id']
+
+    if decrypted_token:
+        await post_to_facebook(post_id, content, decrypted_token, target_id, media_url=media_url, media_urls=media_urls, is_reel=is_reel)
     else:
         logger.error(f"No Page target found for user {user_id}")
         await log_post_stage(
